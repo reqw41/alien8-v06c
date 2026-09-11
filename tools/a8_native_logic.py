@@ -85,6 +85,7 @@ def presub(src):
 
 _BODIES = [
     ('set_draw_objs_overlapped', 'N_SET_DRAW'),
+    ('list_objects_to_draw', 'N_LIST_OBJS'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -660,4 +661,54 @@ usl_nc:		ld (z80_ix), hl
 		jp nc, done_sprite_updates
 		jp update_sprite_loop
         ; ---------------------------------------------------------------------------
+"""
+
+
+# ---------------------------------------------------------------------------
+# list_objects_to_draw: индексы непустых объектов с флагом DRAW (бит 4 поля +7) ->
+# objects_to_draw, терминатор 0xFF. Один вызов, 40 проходов, 430 тактов на проход.
+# Указатель объекта в HL, поле флагов как l+7 (переноса нет, см. ASSERT в
+# set_draw_objs_overlapped), возврат к базе слит с шагом +32 в одно сложение +25.
+# Оригинал сохраняет только IX; DE/HL/BC он портит — здесь тоже.
+# ---------------------------------------------------------------------------
+N_LIST_OBJS = """list_objects_to_draw:
+		ld hl, (z80_ix)
+		push hl
+		ld hl, graphic_objs_tbl
+		ld de, objects_to_draw
+		ld c, 0
+		ld a, (a8_nobj)
+		ld b, a
+lo_1:		ld a, (hl)			; graphic_no
+		or a
+		jp z, lo_skip
+		ld a, l
+		add a, 7
+		ld l, a				; -> +7
+		ld a, (hl)
+		and 0x10			; DRAW?
+		jp z, lo_n7
+		ld a, c
+		ld (de), a			; индекс -> список
+		inc de
+lo_n7:		ld a, l
+		add a, 25			; -7 и сразу +32
+		ld l, a
+		jp nc, lo_step
+		inc h
+		jp lo_step
+lo_skip:	ld a, l
+		add a, 32
+		ld l, a
+		jp nc, lo_step
+		inc h
+lo_step:	inc c
+		dec b
+		jp nz, lo_1
+		ld a, 0xFF
+		ld (de), a			; конец списка
+		pop hl
+		ld (z80_ix), hl
+		ret
+        ; End of function list_objects_to_draw
 """
