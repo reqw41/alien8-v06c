@@ -8,6 +8,7 @@
     python3 tools/a8_z80_to_8080.py <in.asm> <out.asm> [--target lockstep]
 """
 import sys, re, os
+import a8_native_logic
 sys.path.insert(0, __import__('os').path.dirname(__file__))
 
 
@@ -962,7 +963,7 @@ a8_seed:		DS		1			; seed_1 при старте; стенд задаёт
 a8_blk_off:		DS		2			; upd_42/43: смещения (ix+d), в оригинале патчились в код
 a8_visit_bit:	DS		1			; build_screen_objects: номер бита SET n,(HL) (был опкодом)
 a8_rnd_feed:	DS		1			; lockstep: байт mem[seed_2] из журнала ZX
-				ASSERT $ <= 0x00A0
+__A8_NATIVE_SCRATCH__				ASSERT $ <= 0x00A0
 				ORG		0x00A0		; хелперы ldir (scratch выше кончается ~0x76 — не пересекать!)
 """
 
@@ -1163,6 +1164,7 @@ def a8_glue(src, target):
     assert n_end == 2, n_end
     src = src.replace("ld bc, font", "ld bc, a8_vars_end")
     src = src.replace("ld hl, font\n", "ld hl, a8_vars_end\n")
+    src = a8_native_logic.presub(src)
     # ---- КОД, ЛЕЖАЩИЙ В ДАННЫХ ----
     # Пролог calc_display_order_and_render (8 байт) спрятан в ХВОСТЕ буфера
     # objects_to_draw и вызывается как `call objects_to_draw+0x40`; tcdev разобрал
@@ -1244,6 +1246,7 @@ def main():
     src = a8_glue(src, target)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
+    src = a8_native_logic.apply(src)
     helpers = ix_helpers_text()
     if target == 'vec':
         # хелперы — ПОСЛЕ цепочек print_sprite: цепочки обязаны начинаться на границе страницы

@@ -24,6 +24,7 @@
 """
 import os
 import re
+import a8_native_logic
 
 A8_STACK   = 0x8000     # SP растёт вниз; главный и временный стек — от одного адреса
 A8_VIDBUF  = 0xA000     # плоскость 1
@@ -73,7 +74,7 @@ a8_blk_off:		DS		2			; upd_42/43: смещения (ix+d), в оригинале
 a8_visit_bit:	DS		1			; build_screen_objects: номер бита SET n,(HL) (был опкодом)
 a8_lines:		DS		1			; print_sprite: высота окна (для оценки бюджета di)
 a8_shpg:		DS		1			; print_sprite: страница таблицы сдвига (0 = выровненный путь)
-				ASSERT $ <= 0x00A0
+__A8_NATIVE_SCRATCH__				ASSERT $ <= 0x00A0
 				ORG		0x00A0		; хелперы ldir
 """
 
@@ -733,6 +734,7 @@ def glue(src):
     assert n_end == 2, n_end
     src = src.replace("ld bc, font", "ld bc, a8_vars_end")
     src = src.replace("ld hl, font\n", "ld hl, a8_vars_end\n")
+    src = a8_native_logic.presub(src)
     # буфер: плоскость 1; за ним — верхний регион кода
     src = _sub(src, r'^        ORG 0xD200\nvidbuf:\n        DS 0x1800\n',
                "vidbuf:         equ %#06x   ; ПЛОСКОСТЬ 1 (столбцовый буфер)\n"
