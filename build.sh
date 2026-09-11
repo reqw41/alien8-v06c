@@ -24,6 +24,14 @@ elif [ "$TARGET" = "lockstep" ]; then
   python3 tools/check_ixflags.py build/alien8_8080.asm
   python3 tools/check_djnz.py build/alien8_8080.asm
   ls -la build/alien8_8080.r0m
+elif [ "$TARGET" = "vec" ]; then
+  # Вектор-06Ц: ч/б, одна плоскость, нативный столбцовый буфер (этап 4)
+  PYTHONPATH=tools python3 tools/a8_z80_to_8080.py src/alien8_zx.asm build/alien8_vec.asm --target vec
+  ./tools/sjasmplus --lst=build/alien8_vec.lst --sld=build/alien8_vec.sld --fullpath build/alien8_vec.asm
+  python3 tools/check_i8080.py build/alien8_vec.lst
+  python3 tools/check_ixflags.py build/alien8_vec.asm
+  python3 tools/check_djnz.py build/alien8_vec.asm
+  ls -la build/alien8_vec.r0m
 else
   echo "неизвестная цель: $TARGET"; exit 1
 fi

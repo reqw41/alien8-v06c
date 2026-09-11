@@ -1093,7 +1093,23 @@ def a8_seed_oracle(src):
         "        add a, (hl)\n        pop hl\n        add a, l\n        add a, h\n        ld (seed_3), a\n", 1)
 
 
+def a8_vec_glue(src):
+    """Цель `vec`: Вектор-06Ц, ч/б, нативный столбцовый буфер (см. tools/a8_vec.py)."""
+    import a8_vec
+    src = a8_vec.glue(src)
+    src = a8_logic_fixes(src)          # три сайта самомодификации логики + djnz/Z + перенос (ix+25)
+    src = a8_vec.hooks(src)            # палитра комнаты и меню
+    src = a8_vec.glue_i8080(src)       # print_sprite: счётчик строк, вход в цепочку, бюджет di
+    src = src.replace("        DEVICE ZXSPECTRUM48\n",
+                      "        DEVICE ZXSPECTRUM48\n" + a8_vec.header() + _LDIR_HELPERS + "\n", 1)
+    src = re.sub(r'^\s*SAVEBIN[^\n]*$', a8_vec.tail().replace("\\", "\\\\") +
+                 '\n        SAVEBIN "build/alien8_vec.r0m", 0, 0x10000', src, count=1, flags=re.M)
+    return src
+
+
 def a8_glue(src, target):
+    if target == 'vec':
+        return a8_vec_glue(src)
     assert target == 'lockstep', target
     src = src.replace("        DEVICE ZXSPECTRUM48\n",
                       "        DEVICE ZXSPECTRUM48\n" + (A8_HEADER % A8_STACK) + _LDIR_HELPERS + "\n", 1)
@@ -1202,7 +1218,11 @@ def main():
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
     helpers = ix_helpers_text()
-    if helpers:
+    if target == 'vec':
+        # хелперы — ПОСЛЕ цепочек print_sprite: цепочки обязаны начинаться на границе страницы
+        assert src.count('__A8_HELPERS__') == 1, 'место для IX-хелперов'
+        src = src.replace('__A8_HELPERS__', helpers, 1)
+    elif helpers:
         src, n = re.subn(r'(^        ORG 0x[0-9A-Fa-f]+\nvidbuf:)', lambda m: helpers + m.group(1),
                          src, count=1, flags=re.M)
         assert n == 1, 'место для IX-хелперов'
