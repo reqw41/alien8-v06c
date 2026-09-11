@@ -521,20 +521,31 @@ cdo_done:	pop hl				; восстановить IY, IX вызывателя
 		ret
         ; ---------------------------------------------------------------------------
 cdo_ptr:	; A = индекс объекта -> HL = адрес записи. Портит A и HL, BC/DE целы.
+		add a, a
 		ld l, a
-		ld h, 0
-		add hl, hl
-		add hl, hl
-		add hl, hl
-		add hl, hl
-		add hl, hl
-		ld a, l
-		add a, low graphic_objs_tbl
+		ld h, high a8_optr
+		ld a, (hl)
+		inc l
+		ld h, (hl)
 		ld l, a
-		ld a, h
-		adc a, high graphic_objs_tbl
-		ld h, a
 		ret
+		ALIGN 256
+a8_optr:	; индекс объекта (0..55) -> адрес записи. Таблица СТАТИЧЕСКАЯ.
+		DW graphic_objs_tbl+32*0,  graphic_objs_tbl+32*1,  graphic_objs_tbl+32*2,  graphic_objs_tbl+32*3
+		DW graphic_objs_tbl+32*4,  graphic_objs_tbl+32*5,  graphic_objs_tbl+32*6,  graphic_objs_tbl+32*7
+		DW graphic_objs_tbl+32*8,  graphic_objs_tbl+32*9,  graphic_objs_tbl+32*10, graphic_objs_tbl+32*11
+		DW graphic_objs_tbl+32*12, graphic_objs_tbl+32*13, graphic_objs_tbl+32*14, graphic_objs_tbl+32*15
+		DW graphic_objs_tbl+32*16, graphic_objs_tbl+32*17, graphic_objs_tbl+32*18, graphic_objs_tbl+32*19
+		DW graphic_objs_tbl+32*20, graphic_objs_tbl+32*21, graphic_objs_tbl+32*22, graphic_objs_tbl+32*23
+		DW graphic_objs_tbl+32*24, graphic_objs_tbl+32*25, graphic_objs_tbl+32*26, graphic_objs_tbl+32*27
+		DW graphic_objs_tbl+32*28, graphic_objs_tbl+32*29, graphic_objs_tbl+32*30, graphic_objs_tbl+32*31
+		DW graphic_objs_tbl+32*32, graphic_objs_tbl+32*33, graphic_objs_tbl+32*34, graphic_objs_tbl+32*35
+		DW graphic_objs_tbl+32*36, graphic_objs_tbl+32*37, graphic_objs_tbl+32*38, graphic_objs_tbl+32*39
+		DW graphic_objs_tbl+32*40, graphic_objs_tbl+32*41, graphic_objs_tbl+32*42, graphic_objs_tbl+32*43
+		DW graphic_objs_tbl+32*44, graphic_objs_tbl+32*45, graphic_objs_tbl+32*46, graphic_objs_tbl+32*47
+		DW graphic_objs_tbl+32*48, graphic_objs_tbl+32*49, graphic_objs_tbl+32*50, graphic_objs_tbl+32*51
+		DW graphic_objs_tbl+32*52, graphic_objs_tbl+32*53, graphic_objs_tbl+32*54, graphic_objs_tbl+32*55
+		ASSERT (a8_optr & 0xFF) == 0
         ; ---------------------------------------------------------------------------
 ov_prep:	; HL = объект 1: шесть границ -> иммедиаты сравнений. Портит A, B, HL.
 		inc l
