@@ -15,6 +15,7 @@ import re
 # Дополнение к scratch-области 0x0040..0x00A0 обеих целей.
 SCRATCH = """a8_nobj:		DB		56			; занятых записей graphic_objs_tbl (ставит zero_end_of_graphic_objs_tbl)
 a8_objend:		DW		0			; graphic_objs_tbl + a8_nobj*32 — конец занятой части
+cdo_scan:		DS		2			; calc_display_order_and_render: первая ещё не отрисованная запись
 """
 
 
@@ -86,6 +87,11 @@ _BODIES = [
     ('set_draw_objs_overlapped', 'N_SET_DRAW'),
 ]
 
+# Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
+_RANGES = [
+    ('calc_display_order_and_render', 'render_list', 'N_DISPLAY_ORDER'),
+]
+
 
 def apply(src):
     """Замена тел процедур готовым i8080 ПОСЛЕ трансляции."""
@@ -93,6 +99,9 @@ def apply(src):
     for name, var in _BODIES:
         src = _sub(src,
                    r'^%s:\n.*?^        ; End of function %s\n' % (name, name),
+                   globals()[var], 'тело ' + name, flags=re.M | re.S)
+    for name, stop, var in _RANGES:
+        src = _sub(src, r'^%s:\n.*?(?=^%s:)' % (name, stop),
                    globals()[var], 'тело ' + name, flags=re.M | re.S)
     return src
 
@@ -260,4 +269,305 @@ sd_next:	add hl, de
 		ld (z80_iy), hl
 		ret
         ; End of function set_draw_objs_overlapped
+"""
+
+
+# ---------------------------------------------------------------------------
+# calc_display_order_and_render — 22.4 % тактов итерации: перебор пар объектов из
+# objects_to_draw с вычислением класса перекрытия (27 классов, таблица off_C833).
+#
+# Тело движка совпадает с Knight Lore поле в поле (оси: вес 1 — поля +3/+6, вес 3 — +2/+5,
+# вес 9 — +1/+4; класс = z + 3y + 9x), поэтому переносится разбор KL (§17 рецепта):
+#
+#  * КЛАСС НЕ ВЫЧИСЛЯЕТСЯ ЦЕЛИКОМ. По всем 27 входам таблицы интересны ровно
+#    {3,4,6,7,12,15,16} -> d_3467121516 и {13} -> objs_coincide, то есть
+#    «y != 0 И x != 2 И z != 2», а 13 — это (x,y,z) = (1,1,1). Значит достаточно дерева:
+#    сперва y (y = 0 — единственный выход по ПЕРВОМУ сравнению оси и самый частый),
+#    затем x, затем z. Таблица переходов и jump_to_tbl_entry не нужны вовсе.
+#  * ГРАНИЦЫ ОБЪЕКТА 1 (шесть чисел) считаются один раз на объект 1 (ov_prep) и живут
+#    ИММЕДИАТАМИ внутри сравнений: сравнение с полем объекта 2 не занимает регистров.
+#  * ОБЪЕКТ 2 читается указателем HL по месту (inc l / dec l — младший байт записи
+#    не переносит, см. ASSERT), копий в память нет.
+#  * «Тот же объект?» — сравнение ИНДЕКСОВ (иммедиат cdo_i1) ДО вычисления адреса,
+#    а не 16-битное вычитание указателей после.
+#  * render_obj_2 пишется не на каждый объект 2, а только в d_3467121516: до него
+#    DE = тот самый указатель списка (класс перекрытия DE не трогает).
+#  * cdo_scan — первая ещё не отрисованная запись objects_to_draw: перезапуск разбора
+#    начинается с неё, а не с начала списка. Бит 7 в этом проходе только СТАВИТСЯ,
+#    поэтому записи до cdo_scan отмечены навсегда, и искомый индекс (объект 2 не
+#    отрисован) всегда лежит не раньше cdo_scan.
+#  * bit 7,a -> or a / jp m; set 7,(hl) -> ld a,(hl) / or 0x80 / ld (hl),a.
+#
+# Отличия Alien 8 от Knight Lore сохранены дословно: objs_coincide сначала проверяет
+# бит 1 поля +7 у ОБОИХ объектов, порог спрайта 0x60..0x63 (cp 4) и подстановка 0x40.
+# ---------------------------------------------------------------------------
+N_DISPLAY_ORDER = """calc_display_order_and_render:
+		ASSERT (graphic_objs_tbl & 31) <= 25	; иначе l+6 переносит и чтение полей объекта 2 ломается
+		ld hl, objects_to_draw
+		ld (cdo_scan), hl		; отсюда начинается обход списка
+cdo_rest:	ld hl, (cdo_scan)
+		ex de, hl
+cdo_o1:		ld a, (de)			; graphic no
+		inc de
+		cp 0xFF				; конец списка?
+		jp z, cdo_done
+		or a
+		jp m, cdo_o1			; бит 7 = уже отрисован
+		ld (cdo_i1+1), a		; индекс объекта 1 -> иммедиат сравнения
+		ld h, d
+		ld l, e
+		ld (render_obj_1), hl
+		dec hl
+		ld (cdo_scan), hl		; первая ненарисованная запись
+		ld a, (cdo_i1+1)
+		call cdo_ptr			; HL = объект 1
+		ld (z80_ix), hl
+		call ov_prep			; шесть границ объекта 1 -> иммедиаты
+cdo_o2:		ld a, (de)			; следующий graphic no
+		inc de
+		or a				; бит 7 чист -> кандидат (частый случай)
+		jp p, cdo_i1
+		cp 0xFF				; конец списка?
+		jp z, cdo_no2
+		jp cdo_o2
+cdo_i1:		cp 0				; тот же объект? (иммедиат = индекс объекта 1)
+		jp z, cdo_o2
+		call cdo_ptr
+		inc l
+		inc l				; HL = объект 2 + 2 (поле оси веса 3)
+		; ---- ось веса 3 ----
+		ld a, (hl)
+		ld b, a
+		inc l
+		inc l
+		inc l				; +5
+		add a, (hl)
+		ld c, a				; f2 + d2
+ov_ym:		ld a, 0				; [f1 - d1]
+		sub c
+		jp nc, cdo_o2			; y = 0 -> любой класс продолжает цикл
+		ld a, b
+		sub (hl)			; f2 - d2
+ov_yp:		sub 0				; [f1 + d1]
+		jp c, ov_y1			; y = 1
+		; y = 2: интересно только при x != 2 и z != 2, и это всегда d_3467121516
+		dec l
+		dec l
+		dec l
+		dec l				; +1
+		ld a, (hl)
+		ld b, a
+		inc l
+		inc l
+		inc l				; +4
+		add a, (hl)
+		ld c, a
+ov_xm2:		ld a, 0				; [f1 - d1]
+		sub c
+		jp nc, ov_zs			; x = 0
+		ld a, b
+		sub (hl)
+ov_xp2:		sub 0				; [f1 + d1]
+		jp nc, cdo_o2			; x = 2 -> продолжить цикл
+ov_zs:		dec l				; +3
+		ld a, (hl)
+		ld b, a
+		inc l
+		inc l
+		inc l				; +6
+		add a, (hl)
+		ld c, a
+ov_z1s:		ld a, 0				; [z1]
+		sub c
+		jp nc, d_3467121516		; z = 0
+		ld a, b				; z2
+ov_zhs:		sub 0				; [z1 + h1]
+		jp nc, cdo_o2			; z = 2 -> продолжить цикл
+		jp d_3467121516			; z = 1
+ov_y1:		dec l
+		dec l
+		dec l
+		dec l				; +1
+		ld a, (hl)
+		ld b, a
+		inc l
+		inc l
+		inc l				; +4
+		add a, (hl)
+		ld c, a
+ov_xm1:		ld a, 0				; [f1 - d1]
+		sub c
+		jp nc, ov_zs			; x = 0 -> классы 3/4 при z != 2
+		ld a, b
+		sub (hl)
+ov_xp1:		sub 0				; [f1 + d1]
+		jp nc, cdo_o2			; x = 2
+		dec l				; x = 1, y = 1: +3
+		ld a, (hl)
+		ld b, a
+		inc l
+		inc l
+		inc l				; +6
+		add a, (hl)
+		ld c, a
+ov_z1f:		ld a, 0				; [z1]
+		sub c
+		jp nc, d_3467121516		; z = 0 -> класс 12
+		ld a, b
+ov_zhf:		sub 0				; [z1 + h1]
+		jp nc, cdo_o2			; z = 2 -> класс 14
+		; z = 1 -> класс 13: объекты совпали
+		ld a, l				; сюда всегда с L = объект 2 + 6
+		sub 6
+		ld l, a
+		ld (z80_iy), hl
+		ld a, l
+		add a, 7
+		ld l, a				; +7 объекта 2
+		ld b, (hl)
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 7
+		ld l, a				; +7 объекта 1
+		ld a, (hl)
+		or b
+		and 2				; бит 1 хоть у одного — ничего не делать
+		jp nz, cdo_o2
+		ld a, l
+		sub 7
+		ld l, a				; graphic_no объекта 1
+		ld a, (hl)
+		sub 0x60
+		cp 4
+		jp nc, cdo_co2
+		ld (hl), 0x40
+		jp cdo_o2
+cdo_co2:	ld hl, (z80_iy)			; graphic_no объекта 2
+		ld a, (hl)
+		sub 0x60
+		cp 4
+		jp nc, cdo_o2
+		ld (hl), 0x40
+		jp cdo_o2
+        ; ---------------------------------------------------------------------------
+d_3467121516:	ld a, l				; сюда всегда с L = объект 2 + 6
+		sub 6
+		ld l, a
+		ld (z80_iy), hl			; объект 2 понадобится ниже
+		ld h, d				; DE = render_obj_2 (класс перекрытия DE не трогает)
+		ld l, e
+		ld (render_obj_2), hl
+		dec hl				; -> запись объекта 2
+		ld c, (hl)			; индекс
+		ld de, render_list
+cdo_rl:		ld a, (de)
+		cp 0xFF				; пустая запись?
+		jp z, cdo_add
+		cp c				; уже в списке?
+		jp z, cdo_found
+		inc de
+		jp cdo_rl
+        ; ---------------------------------------------------------------------------
+cdo_add:	ld a, c
+		ld (de), a			; добавить в список
+		inc de
+		ld a, 0xFF
+		ld (de), a			; конец списка
+		ld a, c
+		ld (cdo_i1+1), a		; объект 2 становится объектом 1
+		ld hl, (z80_iy)
+		ld (z80_ix), hl
+		call ov_prep
+		ld hl, (render_obj_2)
+		ld (render_obj_1), hl
+		ld hl, (cdo_scan)		; записи до cdo_scan уже отрисованы
+		ex de, hl
+		jp cdo_o2
+        ; ---------------------------------------------------------------------------
+cdo_found:	ld hl, (cdo_scan)
+cdo_fl:		ld a, (hl)
+		inc hl
+		cp 0xFF				; конец списка?
+		jp z, cdo_rest
+		cp c				; тот, который ищем?
+		jp nz, cdo_fl
+		push hl
+		ld hl, (z80_iy)
+		ld (z80_ix), hl			; объект 2 становится объектом 1
+		pop hl
+		jp cdo_mark
+        ; ---------------------------------------------------------------------------
+cdo_no2:	ld hl, (render_obj_1)
+cdo_mark:	dec hl				; -> запись объекта в objects_to_draw
+		ld a, (hl)
+		or 0x80				; пометить отрисованным
+		ld (hl), a
+		ld a, 0xFF
+		ld (render_list), a
+		ld hl, rendered_objs_cnt
+		inc (hl)
+		call loc_D013
+		jp cdo_rest
+        ; ---------------------------------------------------------------------------
+cdo_done:	pop hl				; восстановить IY, IX вызывателя
+		ld (z80_iy), hl
+		pop hl
+		ld (z80_ix), hl
+		ret
+        ; ---------------------------------------------------------------------------
+cdo_ptr:	; A = индекс объекта -> HL = адрес записи. Портит A и HL, BC/DE целы.
+		ld l, a
+		ld h, 0
+		add hl, hl
+		add hl, hl
+		add hl, hl
+		add hl, hl
+		add hl, hl
+		ld a, l
+		add a, low graphic_objs_tbl
+		ld l, a
+		ld a, h
+		adc a, high graphic_objs_tbl
+		ld h, a
+		ret
+        ; ---------------------------------------------------------------------------
+ov_prep:	; HL = объект 1: шесть границ -> иммедиаты сравнений. Портит A, B, HL.
+		inc l
+		ld a, (hl)			; +1
+		ld b, a
+		inc l
+		inc l
+		inc l				; +4
+		add a, (hl)
+		ld (ov_xp1+1), a
+		ld (ov_xp2+1), a
+		ld a, b
+		sub (hl)
+		ld (ov_xm1+1), a
+		ld (ov_xm2+1), a
+		dec l
+		dec l				; +2
+		ld a, (hl)
+		ld b, a
+		inc l
+		inc l
+		inc l				; +5
+		add a, (hl)
+		ld (ov_yp+1), a
+		ld a, b
+		sub (hl)
+		ld (ov_ym+1), a
+		dec l
+		dec l				; +3
+		ld a, (hl)
+		ld (ov_z1s+1), a
+		ld (ov_z1f+1), a
+		inc l
+		inc l
+		inc l				; +6
+		add a, (hl)
+		ld (ov_zhs+1), a
+		ld (ov_zhf+1), a
+		ret
+        ; ---------------------------------------------------------------------------
 """
