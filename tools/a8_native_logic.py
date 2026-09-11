@@ -100,6 +100,10 @@ def apply(src):
         src = _sub(src,
                    r'^%s:\n.*?^        ; End of function %s\n' % (name, name),
                    globals()[var], 'тело ' + name, flags=re.M | re.S)
+    m = re.search(r'^update_sprite_loop:\n\s*ld sp, (\S+)\n', src, re.M)
+    assert m, 'a8_native_logic: не нашёл ld sp в update_sprite_loop'
+    src = _sub(src, r'^update_sprite_loop:\n.*?(?=^done_sprite_updates:)',
+               N_UPD_LOOP % {'sp': m.group(1)}, 'тело update_sprite_loop', flags=re.M | re.S)
     for name, stop, var in _RANGES:
         src = _sub(src, r'^%s:\n.*?(?=^%s:)' % (name, stop),
                    globals()[var], 'тело ' + name, flags=re.M | re.S)
@@ -569,5 +573,91 @@ ov_prep:	; HL = объект 1: шесть границ -> иммедиаты с
 		ld (ov_zhs+1), a
 		ld (ov_zhf+1), a
 		ret
+        ; ---------------------------------------------------------------------------
+"""
+
+
+# ---------------------------------------------------------------------------
+# update_sprite_loop + jump_to_upd_object + jump_to_tbl_entry + ret_from_tbl_jp —
+# диспетчер обновления объектов, 56 (теперь 40) проходов на итерацию, 22 % тактов.
+#
+# Что сделано:
+#  * четыре копии полей (+24..+27 -> +28..+31) идут парой указателей HL/DE по 32 такта
+#    на поле вместо восьми обращений (ix+d) по 130;
+#  * ret_from_tbl_jp: подмешивание `ld a,r` в seed_3 УБРАНО целиком. На i8080 регистра R
+#    нет, транслятор ставит `ld a,0`, и детерминированный снимок ZX-стенда патчен так же
+#    (см. LOCKSTEP.md, три сайта ED 5F -> 3E 00), то есть `seed_3 += 0` — запись того же
+#    значения. Локстеп это подтверждает байт в байт.
+#  * шаг к следующей записи и сравнение с концом занятой части — 8-битными операциями
+#    (sub l / sbb h), без 16-битной эмуляции sbc hl,bc с восстановлением флагов.
+# jump_to_tbl_entry остаётся общей точкой (L = индекс, BC = таблица): в неё прыгает
+# calc_plyr_dXY. jump_to_upd_object — точка входа для upd_3F.
+# ---------------------------------------------------------------------------
+N_UPD_LOOP = """update_sprite_loop:
+		ld sp, %(sp)s
+		ld hl, ret_from_tbl_jp		; адрес возврата обработчика
+		push hl
+		ld hl, (z80_ix)
+		ld d, h
+		ld e, l
+		ld a, l
+		add a, 24
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; HL = +24 (ширина, высота, X, Y)
+		ld a, e
+		add a, 28
+		ld e, a
+		ld a, d
+		adc a, 0
+		ld d, a				; DE = +28 (их «старые» копии)
+		ld a, (hl)
+		ld (de), a
+		inc hl
+		inc de
+		ld a, (hl)
+		ld (de), a
+		inc hl
+		inc de
+		ld a, (hl)
+		ld (de), a
+		inc hl
+		inc de
+		ld a, (hl)
+		ld (de), a
+jump_to_upd_object:
+		ld hl, (z80_ix)
+		ld a, (hl)			; graphic_no -> номер обработчика
+		ld l, a
+		ld bc, upd_sprite_jmp_tbl
+jump_to_tbl_entry:
+		ld h, 0
+		add hl, hl
+		add hl, bc
+		ld a, (hl)
+		inc hl
+		ld h, (hl)
+		ld l, a
+		jp (hl)
+        ; ---------------------------------------------------------------------------
+ret_from_tbl_jp:
+		; `ld a,r : ld c,a : ld a,(seed_3) : add a,c : ld (seed_3),a` — на i8080 R нет,
+		; a = 0, то есть seed_3 не меняется; снято целиком.
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 32			; следующая запись таблицы
+		ld l, a
+		jp nc, usl_nc
+		inc h
+usl_nc:		ld (z80_ix), hl
+		ex de, hl
+		ld hl, (a8_objend)
+		ld a, e
+		sub l
+		ld a, d
+		sbc a, h			; конец занятой части пройден?
+		jp nc, done_sprite_updates
+		jp update_sprite_loop
         ; ---------------------------------------------------------------------------
 """
