@@ -9,9 +9,17 @@ cd "$(dirname "$0")/.."
 REF=${1:-HEAD}
 N=${2:-150}
 STAND=${A8_RESEARCH:-$HOME/projects/alien8-research}/zx-stand
+./build.sh vec >/dev/null 2>&1            # текущее дерево обязано быть пересобрано
 rm -rf build/ref && mkdir -p build/ref
 git archive "$REF" | tar -x -C build/ref
-cp tools/*.js tools/*.py build/ref/tools/ 2>/dev/null || true
+# ВАЖНО: из текущего дерева берутся ТОЛЬКО измерительные инструменты (стенд .js и мелкие
+# отчёты). Транслятор и склейка (a8_z80_to_8080.py, a8_vec.py, a8_native_logic.py, …) — это
+# КОД ПОРТА, и копировать их в эталон нельзя: гейт сравнивал бы сборку саму с собой.
+cp tools/*.js build/ref/tools/ 2>/dev/null || true
+for t in a8_size.py a8_regions.py pgm2png.py; do
+  [ -f "tools/$t" ] && cp "tools/$t" build/ref/tools/ 2>/dev/null
+done
+true
 ( cd build/ref && ./build.sh vec >/dev/null 2>&1 )
 fail=0
 for sc in rest alive; do

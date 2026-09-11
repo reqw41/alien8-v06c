@@ -44,8 +44,22 @@ function key(k,down){
 const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync(INPUTS,"utf8").split("\n")){const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+LAG]=inputs[+m[1]+LAG]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
 let FR=0,TOT=0,iterFr=[],iterCy=[];
 let phase="menu",iter=0,steps=0,total=0; const cyc=new Float64Array(fa.length), calls=new Float64Array(fa.length), hcyc=new Float64Array(fa.length);
+// A8GAG=1: погасить seed_3 += mem[seed_2] (86 add a,(hl) -> 00 nop). Без этого две сборки
+// с разной раскладкой кода играют РАЗНЫЙ сценарий и «тактов/итерацию» несравнимы (§14/§17.1).
+if(process.env.A8GAG){ const rdb=a=>memory.bytes[memory.tobank(a&0xffff)];
+  const s3=L.seed_3&0xff, s3h=(L.seed_3>>8)&0xff;
+  const pat=[0x3A,s3,s3h,0x86,0x85,0x84,0x32,s3,s3h]; let at=-1;
+  for(let a=0x100;a<0xF000&&at<0;a++){let ok=true;for(let i=0;i<pat.length;i++)if(rdb(a+i)!==pat[i]){ok=false;break;}if(ok)at=a;}
+  if(at<0)throw new Error("не нашёл seed_3 += mem[seed_2]");
+  ow(at+3,0x00,false); }
+let roomSet=false;
 memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
+  // A8ROOM=<байт>: подменить номер комнаты. Номер лежит в поле +8 объектов 0 и 1 и
+  // пишется в init_start_location; retrieve_screen читает его позже (cp (ix+8)), поэтому
+  // подменяем САМУ ЗАПИСЬ, пока не загружена первая комната (phase === "init").
+  if(process.env.A8ROOM&&phase==="init"&&(a===L.graphic_objs_tbl+8||a===L.graphic_objs_tbl+40)){
+    w=+process.env.A8ROOM;roomSet=true;}
   if(a===ROOM&&phase==="init"&&w!==0){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){iter++;iterFr.push(FR);iterCy.push(TOT);for(const [k,d] of (inputs[iter]||[]))key(k,d);}
   return ow(a,w,s);};
