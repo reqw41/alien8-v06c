@@ -1029,6 +1029,19 @@ def a8_logic_fixes(src):
                      "        ld a, 1\n        inc b\n"
                      "a8_vb_m:\n        dec b\n        jp z, a8_vb_d\n        rlca\n        jp a8_vb_m\n"
                      "a8_vb_d:\n        or (hl)\n        ld (hl), a\n        pop bc\n") + src[j:]
+    # 2а) sub_AD66: `xor a / .loop: or (hl) / inc hl / djnz .loop / jp z, game_over` —
+    #     Z после цикла должен отражать НАКОПЛЕННЫЙ OR (все байты нулевые = игра окончена).
+    #     У Z80 djnz флаги не трогает, на i8080 он разворачивается в `dec b / jp nz` и Z
+    #     всегда равен 1 (выход по B==0) — игра уходила в GAME OVER на первой же итерации
+    #     главного цикла. Пересчитываем Z по A: `and a` не меняет A и стоит 4 такта.
+    old = ("        djnz loc_ADA8\n"
+           "        jp z, game_over\n")
+    assert src.count(old) == 1, 'sub_AD66 djnz/Z'
+    src = src.replace(old,
+        "        djnz loc_ADA8\n"
+        "        and a   ; A8: djnz на i8080 портит Z — пересчитать по накопленному OR\n"
+        "        jp z, game_over\n", 1)
+
     # 3) upd_103 («лишняя жизнь»): `is_on_or_near_obj` возвращает ответ в ПЕРЕНОСЕ, а между
     #    ним и `jr nc` стоят `dec (ix+4)`/`dec (ix+5)`. У Z80 `dec (ix+d)` перенос не трогает,
     #    а хелпер il_ix_dec считает адрес через `add a,l / adc a,0` и перенос выставляет —

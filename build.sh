@@ -22,6 +22,7 @@ elif [ "$TARGET" = "lockstep" ]; then
   ./tools/sjasmplus --lst=build/alien8_8080.lst --sld=build/alien8_8080.sld --fullpath build/alien8_8080.asm
   python3 tools/check_i8080.py build/alien8_8080.lst
   python3 tools/check_ixflags.py build/alien8_8080.asm
+  python3 tools/check_djnz.py build/alien8_8080.asm
   ls -la build/alien8_8080.r0m
 else
   echo "неизвестная цель: $TARGET"; exit 1
