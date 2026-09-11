@@ -809,6 +809,18 @@ def glue(src):
     src, nconv = re.subn(r'vidbuf\+0x([0-9A-Fa-f]+)',
                          lambda m: "vidbuf+0x%X" % _linear_to_col(int(m.group(1), 16)), src)
     assert nconv == 7, nconv
+    # sub_AD66: мигающая рамка счётчика «LIGHT YEARS» инвертирует 8 байт буфера с шагом +32
+    # (в ЛИНЕЙНОЙ раскладке ZX это следующая строка того же столбца). В столбцовом буфере шаг
+    # строки = +1 в младшем байте. Без правки семь из восьми байт ложились мимо окна блита,
+    # оставались в буфере и всплывали на update_screen двумя штрихами у правого края
+    # (на ZX их прятал атрибут: чернила = фон, §10 рецепта KL).
+    src = _sub(src, r'^        ld b, 8\n        ld de, 0x20[^\n]*\nloc_AD8B:\n        ld a, \(hl\)\n'
+                    r'        cpl\n        ld \(hl\), a\n        add hl, de\n',
+               "        ld b, 8\n"
+               "loc_AD8B:\n        ld a, (hl)\n        cpl\n        ld (hl), a\n"
+               "        inc l   ; столбцовый буфер: следующая строка (в ZX было +32)\n",
+               'sub_AD66: шаг строки в буфере')
+
     # print_8x8: строка ниже = dec l, следующий символ = +0x108
     src = _sub(src, r'^        push bc\n        ld bc, 0xFFE0\n        add hl, bc\n        pop bc\n'
                     r'        djnz loc_BC03\n        pop de\n        ld bc, 0x101\n',
