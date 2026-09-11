@@ -25,7 +25,7 @@ node tools/lockstep_vec.js build/alien8_8080.r0m build/alien8_8080.sld 600 \
   ~/projects/alien8-research/zx-stand/inputs_idle.txt \
   ~/projects/alien8-research/zx-stand/zx_idle600.bin
 
-node tools/shot_vec.js build/alien8_vec.r0m 900 build/keys_start.txt build/shot.pgm
+node tools/shot_vec.js build/alien8_vec.r0m 900 spec/keys_start.txt build/shot.pgm
 python3 tools/pgm2png.py build/shot.pgm /tmp/shot.png     # посмотреть картинку
 tools/render_gate.sh HEAD 120                             # гейт картинки vs ревизия
 node tools/profile_vec.js build/alien8_vec.r0m build/alien8_vec.sld 150

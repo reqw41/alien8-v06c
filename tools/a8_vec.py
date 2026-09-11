@@ -903,6 +903,8 @@ def glue_i8080(src):
     assert src.count(end) == 1, 'print_sprite: конец пиксельного цикла'
     b = src.index(end, a) + len(end)
     chain = ("; ---- цепочки print_sprite: начало верхнего региона = граница страницы ----\n"
+             "pixel_chain_aligned:   ; выровненная цепочка (своей метки в оригинале нет — иначе профиль\n"
+             "               ; относит её такты к предыдущей метке, то есть к a8_vars_end)\n"
              + src[a:b]
              + "        ASSERT high (loc_D0BB) == high (loc_D10E)   ; обе цепочки в одной странице\n"
              + "__A8_HELPERS__\n")
