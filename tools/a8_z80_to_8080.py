@@ -1110,7 +1110,7 @@ def a8_vec_glue(src):
     """Цель `vec`: Вектор-06Ц, ч/б, нативный столбцовый буфер (см. tools/a8_vec.py)."""
     import a8_vec
     hot = os.environ.get('A8_IX_HOT')
-    if hot is None:
+    if hot is None or hot == '1':
         _IX_INLINE_FUNCS.update(A8_VEC_INLINE)
     elif hot not in ('', '0'):
         _IX_INLINE_FUNCS.update(x for x in hot.split(',') if x)
@@ -1129,6 +1129,15 @@ def a8_glue(src, target):
     if target == 'vec':
         return a8_vec_glue(src)
     assert target == 'lockstep', target
+    # Развёртка (ix+d) в горячих процедурах здесь ВЫКЛЮЧЕНА по умолчанию (темп на этой цели
+    # не меряем), но `A8_IX_HOT=1` включает ТОТ ЖЕ список, что у цели vec: иначе гейт локстепа
+    # вакуумный — он проверяет код с компактными хелперами, а в игру идёт код с развёрткой,
+    # где флаги вокруг обращения сохраняются другим способом (журнал, этап 5).
+    hot = os.environ.get('A8_IX_HOT')
+    if hot == '1':
+        _IX_INLINE_FUNCS.update(A8_VEC_INLINE)
+    elif hot:
+        _IX_INLINE_FUNCS.update(x for x in hot.split(',') if x)
     src = src.replace("        DEVICE ZXSPECTRUM48\n",
                       "        DEVICE ZXSPECTRUM48\n" + (A8_HEADER % A8_STACK) + _LDIR_HELPERS + "\n", 1)
     src = a8_logic_fixes(src)
