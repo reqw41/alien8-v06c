@@ -1104,6 +1104,17 @@ A8_VEC_INLINE = {
     'set_both_deadly_flags', 'upd_02', 'print_sprite', 'wipe_next_object',
     'sub_C099', 'flip_sprite', 'sub_C082', 'upd_10_to_17', 'add_dXYZ',
     'calc_2d_info', 'upd_20_to_2B', 'get_ptr_object',
+    # Второй заход (после ручной переписи четырёх циклов): процедуры, у которых больше 70 %
+    # собственных тактов уходило в компактные хелперы. Порог — ЗАМЕР «тактов на байт»
+    # (цена каждой мерялась отдельной сборкой, выигрыш = половина её хелперных тактов):
+    #   vflip_sprite_data 34, upd_03 26, adj_dZ_for_out_of_bounds 14, sub_C2BC 6.4,
+    #   set_wipe_and_draw_flags 6.4, adj_for_out_of_bounds 6.3, dZ_ok 6.2, clear_dX_dY 5.6,
+    #   handle_forward 5.2, chk_plyr_OOB 5.2, move_player 5.2.
+    # Ниже порога 5 и потому НЕ взяты: handle_exit_screen 4.2 (61 Б),
+    # next_fg_obj_sprite 3.0 (221 Б — вдобавок процедура холодная, работает при входе в комнату).
+    'vflip_sprite_data', 'adj_for_out_of_bounds', 'dZ_ok',
+    'adj_dZ_for_out_of_bounds', 'sub_C2BC', 'upd_03', 'handle_forward', 'chk_plyr_OOB',
+    'move_player', 'set_wipe_and_draw_flags', 'clear_dX_dY',
 }
 
 
