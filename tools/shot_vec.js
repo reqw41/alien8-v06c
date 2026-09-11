@@ -46,3 +46,6 @@ if(OUT){const hdr=Buffer.from(`P5\n${W} ${H}\n255\n`);fs.writeFileSync(OUT,Buffe
 let art="";
 for(let y=0;y<256;y+=5){let s="";for(let x=0;x<256;x+=4){let v=0;for(let dy=0;dy<5;dy++)for(let dx=0;dx<4;dx++)v|=px[(y+dy)*W+x+dx];s+=v?"#":".";}art+=s+"\n";}
 console.log(art);
+// координаты героя (graphic_objs_tbl+1..+3 = X,Y,Z) — видно, дошёл ли ввод до логики
+if(process.env.A8SLD){const L={};for(const l of require("fs").readFileSync(process.env.A8SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L))L[n]=+p[5];}}
+  const t=L.graphic_objs_tbl;console.log(`герой: X=${rd(t+1)} Y=${rd(t+2)} Z=${rd(t+3)} gfx=${rd(t+0)}; жизни=${rd(L.lives)}; ряды ZX=${[...Array(8)].map((_,r)=>rd(L.vec_zxrows+r).toString(16)).join(" ")}`);}
