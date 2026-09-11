@@ -681,6 +681,13 @@ def _ix_form(mn, ops, idxinfo):
             midx = i
     if midx is None:
         return None
+    # ОТРИЦАТЕЛЬНОЕ смещение компактному хелперу не по зубам: он берёт смещение
+    # из inline-байта и считает адрес как `add a,l / adc a,0`, то есть трактует его
+    # как БЕЗЗНАКОВОЕ — (ix-19) превращается в (ix+237). Встроенная развёртка
+    # (_idx_addr) знак учитывает, поэтому такие обращения разворачиваем на месте.
+    # В Alien 8 их 13 (у tcdev они и напечатаны без знака: 237(ix) и т. п.).
+    if re.search(r'\((?:ix|iy)\s*-\s*\d', ops[midx], re.I):
+        return None
     if mn == 'ld':
         if midx == 1:
             r = ops[0].lower()
@@ -733,6 +740,13 @@ def _ixiy_compact(mn, ops, idxinfo):
     if midx is None:
         return _ixiy(mn, ops, idxinfo)
     disp = re.sub(r'^\((ix|iy)', '', ops[midx], flags=re.I)[:-1].strip().lstrip('+') or '0'
+    # ОТРИЦАТЕЛЬНОЕ смещение компактному хелперу не по зубам: он берёт смещение из
+    # inline-байта и считает адрес как `add a,l / adc a,0`, то есть трактует его как
+    # БЕЗЗНАКОВОЕ — (ix-19) давало (ix+237). Встроенная развёртка (_idx_addr) знак
+    # учитывает (`(d)&255` и `((d)>>8)&255`), поэтому разворачиваем на месте.
+    # В Alien 8 таких обращений 13 (у tcdev они напечатаны без знака: 237(ix) и т.п.).
+    if disp.lstrip().startswith('-'):
+        return _ixiy(mn, ops, idxinfo)
     def use(form, *extra):
         name = f"il_{px}_{form}"
         _ix_used.add((px, form))
