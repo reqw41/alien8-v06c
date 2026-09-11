@@ -1093,9 +1093,27 @@ def a8_seed_oracle(src):
         "        add a, (hl)\n        pop hl\n        add a, l\n        add a, h\n        ld (seed_3), a\n", 1)
 
 
+# Горячие процедуры цели `vec`: обращения (ix+d)/(iy+d) в них разворачиваются НА МЕСТЕ, а не
+# через компактный хелпер. Замер (tools/profile_vec.js, 100 итераций покоя): хелпер стоит
+# 265 тактов на обращение и съедает 58 % всех тактов; развёртка — около 60. Список — по профилю,
+# сверху вниз по «тактов/итер * доля хелперов». A8_IX_HOT=0 выключает (для сверки).
+A8_VEC_INLINE = {
+    'update_sprite_loop', 'calc_display_order_and_render', 'set_draw_objs_overlapped',
+    'list_objects_to_draw', 'set_pixel_adj', 'jump_to_upd_object', 'calc_pixel_XY',
+    'set_both_deadly_flags', 'upd_02', 'print_sprite', 'wipe_next_object',
+    'sub_C099', 'flip_sprite', 'sub_C082', 'upd_10_to_17', 'add_dXYZ',
+    'calc_2d_info', 'upd_20_to_2B', 'get_ptr_object',
+}
+
+
 def a8_vec_glue(src):
     """Цель `vec`: Вектор-06Ц, ч/б, нативный столбцовый буфер (см. tools/a8_vec.py)."""
     import a8_vec
+    hot = os.environ.get('A8_IX_HOT')
+    if hot is None:
+        _IX_INLINE_FUNCS.update(A8_VEC_INLINE)
+    elif hot not in ('', '0'):
+        _IX_INLINE_FUNCS.update(x for x in hot.split(',') if x)
     src = a8_vec.glue(src)
     src = a8_logic_fixes(src)          # три сайта самомодификации логики + djnz/Z + перенос (ix+25)
     src = a8_vec.hooks(src)            # палитра комнаты и меню
