@@ -1005,6 +1005,30 @@ def _stub_after_label(src, label, note):
     return src[:m.end()] + f"        ret   ; ЗАГЛУШКА({note})\n" + src[m.end():]
 
 
+def a8_no_delay(src):
+    """Искусственная задержка оригинала (B * 0x300 пустых витков при < 6 нарисованных объектов).
+
+    На ZX она выравнивала темп в лёгких комнатах; i8080-Вектор и без неё вдвое медленнее
+    оригинала (11.7 против 24.8 итер/с в стартовой), а темп теперь держит ограничитель
+    `vec_pace`. Цикл снимается ЦЕЛИКОМ (-10 Б), а не глушится переходом.
+
+    Состояние игры не меняется — доказательство по коду:
+    * цикл пишет только HL, A, B и флаги, в память не ходит;
+    * на loc_A715 те же HL/A/B/флаги приходят и по двум ДРУГИМ путям (`jp m, loc_A715`
+      при cnt > 6 и `jr z, loc_A715` при cnt == 6), где HL — что осталось от
+      render_dynamic_objects, B = 6-cnt, флаги — от `add a, 6`. Значит на loc_A715 ни
+      один из этих регистров не может быть прочитан осмысленно;
+    * и прямо: loc_A715 = `call sub_AD66`, а sub_AD66 первой строкой зовёт sub_ADC9,
+      который начинает с `ld hl, unk_5B39` и `ld b, 4` — B и HL мертвы.
+    Локстеп (600 итераций, 1928 Б переменных против журнала ZX) это подтверждает.
+    """
+    old = ("game_delay:\n        ld hl, 0x300\n"
+           "loc_A70E:\n        dec hl\n        ld a, l\n        or h\n"
+           "        jr nz, loc_A70E\n        djnz game_delay\n")
+    assert src.count(old) == 1, 'game_delay'
+    return src.replace(old, "        ; A8: искусственная задержка оригинала снята (a8_no_delay)\n", 1)
+
+
 def a8_logic_fixes(src):
     """Самомодифицирующийся код ЛОГИКИ -> переменные (три сайта, см. docs/PORT_RECIPE.md).
 
@@ -1254,6 +1278,7 @@ def main():
         pos.append(a); i += 1
     inp, outp = pos[0], pos[1]
     src = open(inp, encoding='utf-8').read()
+    src = a8_no_delay(src)             # обе цели: состояние не меняется, локстеп это судит
     src = a8_glue(src, target)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
