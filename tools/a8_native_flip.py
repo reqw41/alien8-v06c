@@ -38,7 +38,7 @@ def _sub(src, pat, repl, name, count=1, flags=re.M):
 
 
 def presub(src):
-    """Проверки на тексте Z80 ДО трансляции.
+    """Правка на тексте Z80 ДО трансляции: calc_2d_info больше не разворачивает спрайт.
 
     ДОКАЗАТЕЛЬСТВО (KL b950776 + трассер A8SPRTRACE=1 в tools/flipstat_vec.js):
     из развёрнутых данных calc_2d_info читает РОВНО два байта — заголовок (ширина, `and 0xF`)
@@ -52,6 +52,11 @@ def presub(src):
     Замер: сам «разворот про запас» не развернул НИ ОДНОГО спрайта на шести комнатах,
     но стоил 1 310..3 056 тактов/итер одной только проверкой.
     """
+    src = _sub(src,
+               r'^calc_2d_info:\n        call calc_pixel_XY\n        call flip_sprite\n',
+               "calc_2d_info:\n        call calc_pixel_XY\n"
+               "        call sprite_addr   ; A8: адрес спрайта БЕЗ разворота (w и h от него не зависят)\n",
+               'разворот про запас в calc_2d_info')
     # адрес таблицы бит-реверса зашит в нативном H-развороте — проверить, что её всё ещё
     # строят по тому же адресу
     assert len(re.findall(r'^        ld hl, 0x%04X\n' % REV_TBL, src, re.M | re.I)) == 1, \
