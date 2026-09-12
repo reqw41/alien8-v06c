@@ -83,6 +83,23 @@ MUTS = [
              "        src = src.replace('        and a   ; A8: djnz на i8080 портит Z —"
              " пересчитать по накопленному OR\\n', '', 1)\n"
              "    return src\n"),
+    dict(name="input", gate="inputcheck",
+         why="в раскладках 2 и 3 «стрелка вверх» переехала с бита 0x20 ряда 0 на мёртвый 0x02: "
+             "ни локстеп, ни гейт картинки этих раскладок не касаются",
+         file="tools/a8_z80_to_8080.py",
+         old="        DB low (vec_kbmat+0), 0x20, 0x04   ; стрелка вверх\n",
+         new="        DB low (vec_kbmat+0), 0x02, 0x04   ; стрелка вверх\n"),
+    dict(name="pause", gate="inputcheck",
+         why="пауза потеряла защиту оригинала «и ни одной другой клавиши того же ряда»: "
+             "ВК лежит в ряду 0 ВМЕСТЕ СО СТРЕЛКАМИ, и ходьба ставила бы ложную паузу",
+         file="tools/a8_z80_to_8080.py",
+         old="        and 0xF4        ; ВК (0x04) + стрелки (0x10 0x20 0x40 0x80)\n        cp 4\n",
+         new="        and 0x04        ; ПОРЧА: только ВК, стрелки не мешают\n        cp 4\n"),
+    dict(name="kbmap", gate="kbcheck",
+         why="отображение «клавиша Вектора -> ряд ZX»: Z уехала с 0x04 на 0x08 ряда 7. Гейт "
+             "картинки и локстеп кладут ряды ZX в память сами и этот путь не видят",
+         file="tools/a8_vec.py",
+         old="vec_kbmat+7,0x04,", new="vec_kbmat+7,0x08,"),
     dict(name="flip", gate="flipcheck",
          why="быстрый путь разворота смотрит только на бит V (`and 0xC0` -> `and 0x80`): "
              "запрос одного лишь H-разворота проходит мимо",
@@ -153,6 +170,14 @@ def gate_result(gate, env=None):
     elif gate == "nobjcheck":
         r = run(["node", "tools/nobjcheck_vec.js", "build/alien8_vec.r0m",
                  "build/alien8_vec.sld", "60"], env)
+    elif gate == "inputcheck":
+        r = run(["node", "tools/inputcheck_vec.js", "build/alien8_vec.r0m",
+                 "build/alien8_vec.sld"], env)
+    elif gate == "kbcheck":
+        # эталон tools/kbref.txt лежит В РЕПОЗИТОРИИ: без него гейт сверял бы таблицу
+        # готовых ответов read_key саму с собой и любую правку vec_zxmap пропускал (§22 KL)
+        r = run(["node", "tools/kbcheck_vec.js", "build/alien8_vec.r0m",
+                 "build/alien8_vec.sld"], env)
     else:
         raise SystemExit("неизвестный гейт: " + gate)
     return r.returncode, (r.stdout + r.stderr)[-400:]
