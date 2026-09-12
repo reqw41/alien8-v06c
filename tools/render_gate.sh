@@ -39,11 +39,24 @@ for sc in "${SCEN[@]}"; do
   esac
   A8ROOM=$ROOM node tools/screendiff_vec.js build/alien8_vec.r0m build/alien8_vec.sld "$N" "$IN" "new_$sc" >/dev/null
   A8ROOM=$ROOM node tools/screendiff_vec.js build/ref/build/alien8_vec.r0m build/ref/build/alien8_vec.sld "$N" "$IN" "ref_$sc" >/dev/null
-  if cmp -s "build/scr_new_$sc.txt" "build/scr_ref_$sc.txt" && cmp -s "build/scr_new_$sc.bin" "build/scr_ref_$sc.bin"; then
-    echo "render_gate [$sc]: СОВПАДЕНИЕ, $N итераций"
+  # ИТЕРАЦИЯ 1 СУДИТСЯ ОТДЕЛЬНО (§13 рецепта KL): на ней на экране (плоскость 0) ещё стоит
+  # МЕНЮ — комнату туда выкладывает update_screen уже внутри первой итерации, — а меню порт
+  # законно меняет (шесть строк, полоса подсветки). Поэтому вердикт выносится по итерациям
+  # 2..N, а у первой сравнивается только БУФЕР (плоскость 1): в нём к этому моменту уже
+  # нарисована комната, и расхождение там — настоящая порча рендера, а не смена меню.
+  # Расхождение экрана на первой итерации печатается отдельной строкой-замечанием.
+  tail -n +2 "build/scr_new_$sc.txt" > "build/scr_new_$sc.tail"
+  tail -n +2 "build/scr_ref_$sc.txt" > "build/scr_ref_$sc.tail"
+  newbuf=$(head -1 "build/scr_new_$sc.txt" | cut -d' ' -f2); refbuf=$(head -1 "build/scr_ref_$sc.txt" | cut -d' ' -f2)
+  newscr=$(head -1 "build/scr_new_$sc.txt" | cut -d' ' -f3); refscr=$(head -1 "build/scr_ref_$sc.txt" | cut -d' ' -f3)
+  if cmp -s "build/scr_new_$sc.tail" "build/scr_ref_$sc.tail" && cmp -s "build/scr_new_$sc.bin" "build/scr_ref_$sc.bin" \
+     && [ "$newbuf" = "$refbuf" ]; then
+    echo "render_gate [$sc]: СОВПАДЕНИЕ, итерации 2..$N (и буфер итерации 1)"
+    [ "$newscr" = "$refscr" ] || echo "render_gate [$sc]: ЗАМЕЧАНИЕ — экран итерации 1 отличается ($refscr -> $newscr): на нём ещё меню"
   else
     echo "render_gate [$sc]: РАСХОЖДЕНИЕ"
-    diff "build/scr_ref_$sc.txt" "build/scr_new_$sc.txt" | head -4
+    [ "$newbuf" = "$refbuf" ] || echo "  итерация 1: разошёлся БУФЕР ($refbuf -> $newbuf) — это не меню"
+    diff "build/scr_ref_$sc.tail" "build/scr_new_$sc.tail" | head -4
     fail=1
   fi
 done

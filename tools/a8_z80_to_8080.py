@@ -1006,6 +1006,288 @@ def _stub_after_label(src, label, note):
     return src[:m.end()] + f"        ret   ; ЗАГЛУШКА({note})\n" + src[m.end():]
 
 
+# ---------------------------------------------------------------------------
+# МЕНЮ И УПРАВЛЕНИЕ (обе цели): варианты ввода ZX вырезаны, меню — как у Городецкого.
+# ---------------------------------------------------------------------------
+A8_SETMODE_VEC = """a8_setmode:   ; номер режима (tmp_input_method 0..2) -> user_input_method + полоса подсветки.
+        ; ПОДСВЕТКА — ФОН строки, а не инверсия картинки: буквы остаются белыми, как у Городецкого.
+        ; Как: знакоместа строки заливаются 0xFF в ПЛОСКОСТИ 0 (экран), а буквы от фона отличает
+        ; ПЛОСКОСТЬ 1 — столбцовый буфер: наш update_screen буфер НЕ обнуляет (он только копирует,
+        ; в отличие от Knight Lore), поэтому в меню буфер побайтно повторяет экран. Палитра меню:
+        ; индексы 8..11 (p0=1, p1=0) — синий фон полосы, 12..15 (p0=1, p1=1) — белые буквы.
+        ; Точки с p0=0 остаются чёрными при любых p1..p3, поэтому плоскости 2 и 3 (а там лежат
+        ; переменные, верхний регион кода и таблицы сдвига) наружу не проступают.
+        ; Плоскость 2 под полосу НЕ ГОДИТСЯ вовсе: 0xC000..0xDFFF занято кодом и переменными,
+        ; красить пришлось бы индексы с p0=0 — и весь этот код вылез бы рябью по всему кадру.
+        ; Экран Вектора столбцовый: адрес = 0x8000 + столбец*256 + (Y + 32); print_8x8 идёт ВНИЗ
+        ; по младшему байту (dec l), поэтому знакоместо строки Y занимает L = Y+25 .. Y+32.
+        ld hl, vidbuf + 6*256 + 112   ; чистый текст трёх строк режимов из буфера
+        ld de, 0x8000 + 6*256 + 112   ; в плоскость 0: снимает прежнюю полосу.
+        ld bc, 28*256 + 21            ; столбцы 6..26, строки 112..167; два блита по 28 строк —
+        call blit_to_screen           ; быстрый (стековый) путь blit_to_screen работает до 32
+        ld hl, vidbuf + 6*256 + 140
+        ld de, 0x8000 + 6*256 + 140
+        ld bc, 28*256 + 21
+        call blit_to_screen
+        ld a, (tmp_input_method)
+        ld e, a
+        add a, a
+        add a, e             ; *3
+        ld e, a
+        ld d, 0
+        ld hl, a8_modetab
+        add hl, de
+        ld a, (hl)
+        ld (user_input_method), a
+        inc hl
+        ld d, (hl)           ; нижняя строка полосы
+        inc hl
+        ld b, (hl)           ; ширина в знакоместах
+        ld h, 0x86           ; X = 48 -> столбец 6 плоскости 0 (0x8000 + 6*256)
+        ld a, 0xFF
+a8_sm_col:
+        ld l, d
+        ld c, 8
+a8_sm_row:
+        ld (hl), a
+        inc l
+        dec c
+        jr nz, a8_sm_row
+        inc h
+        dec b
+        jr nz, a8_sm_col
+a8_menu_exit:
+        ; полосу за собой убирать не надо: в игру идут через clear_scrn_buffer + update_screen,
+        ; а палитру перебивает vec_set_pal по цвету комнаты (крючок в hooks())
+        ret
+a8_modetab:   ; режим: user_input_method, нижняя строка полосы (Y+25), ширина в знакоместах
+        DB 0, 160, 10   ; 1 KEYBOARD            (Y = 135, 10 знаков)
+        DB 4, 136, 8    ; 2 CURSOR              (Y = 111,  8 знаков)
+        DB 8, 112, 21   ; 3 DIRECTIONAL CONTROL (Y =  87, 21 знак)
+"""
+
+A8_VEC_INPUT = """a8_vec_input:   ; ТРИ РАСКЛАДКИ, читаются ПРЯМО ИЗ МАТРИЦЫ ВЕКТОРА (vec_kbmat, active-high).
+        ; Таблица: младший байт адреса ряда, маска клавиш ряда, биты user_input; 0 = конец списка.
+        ; Биты user_input: 0 влево, 1 вправо, 2 вперёд, 3 прыжок, 4 взять (поворотный режим,
+        ; в directional этот бит — «вниз»), 5 взять (directional; chk_pickup_drop его сдвигает).
+        ; Ряды Вектора: 0 ВК(0x04)/стрелки, 2 цифры 0..7, 3 цифры 8,9, 4 @ABCDEFG, 5 HIJKLMNO,
+        ; 6 PQRSTUVW, 7 XYZ[\\]^ПРБ.
+        ld de, a8_in_t3
+        ld a, (user_input_method)
+        and 8                  ; 3 DIRECTIONAL CONTROL
+        jr nz, a8_in_scan
+        ld de, a8_in_t2
+        ld a, (user_input_method)
+        and 4                  ; 2 CURSOR
+        jr nz, a8_in_scan
+        ld de, a8_in_t1        ; 1 KEYBOARD (user_input_method = 0)
+a8_in_scan:
+        ld c, 0
+        ld h, high vec_kbmat
+a8_in_1:
+        ld a, (de)             ; младший байт ряда (0 = конец)
+        and a
+        jr z, a8_in_store
+        ld l, a
+        inc de
+        ld a, (de)             ; маска клавиш ряда
+        and (hl)
+        inc de
+        ld a, (de)             ; биты user_input; ld a,(de) и inc de флагов не трогают,
+        inc de                 ; поэтому Z здесь ещё от `and (hl)`
+        jr z, a8_in_1
+        or c
+        ld c, a
+        jr a8_in_1
+a8_in_store:
+        ld a, c
+        ld (user_input), a
+        ret
+        ; End of function check_user_input
+a8_in_t1:   ; 1 KEYBOARD — КЛАВИШИ ОРИГИНАЛА Alien 8 (расшифровка `keyboard:` листинга tcdev):
+            ; Z C M B влево, X V N SYM вправо, A..G H..L вперёд, Q..T P..Y прыжок, цифры взять.
+            ; ZX ENTER (тоже «вперёд») на Вектор не перенесён: ВК отдана ПАУЗЕ, см. audio_CE22.
+            ; ZX SYMBOL SHIFT лежит в позиции «\\» матрицы Вектора — маска ряда 7 общая, даром.
+        DB low (vec_kbmat+7), 0x04, 0x01   ; Z             -> влево
+        DB low (vec_kbmat+4), 0x0C, 0x01   ; C B           -> влево
+        DB low (vec_kbmat+5), 0x20, 0x01   ; M             -> влево
+        DB low (vec_kbmat+7), 0x11, 0x02   ; X \\ (SYM)     -> вправо
+        DB low (vec_kbmat+6), 0x40, 0x02   ; V             -> вправо
+        DB low (vec_kbmat+5), 0x40, 0x02   ; N             -> вправо
+        DB low (vec_kbmat+4), 0xD2, 0x04   ; A D F G       -> вперёд
+        DB low (vec_kbmat+6), 0x08, 0x04   ; S             -> вперёд
+        DB low (vec_kbmat+5), 0x1D, 0x04   ; H J K L       -> вперёд
+        DB low (vec_kbmat+6), 0xB7, 0x08   ; P Q R T U W   -> прыжок
+        DB low (vec_kbmat+4), 0x20, 0x08   ; E             -> прыжок
+        DB low (vec_kbmat+5), 0x82, 0x08   ; I O           -> прыжок
+        DB low (vec_kbmat+7), 0x02, 0x08   ; Y             -> прыжок
+        DB low (vec_kbmat+2), 0xFF, 0x10   ; 0..7          -> взять/бросить
+        DB low (vec_kbmat+3), 0x03, 0x10   ; 8 9           -> взять/бросить
+        DB 0
+a8_in_t3:   ; 3 DIRECTIONAL CONTROL = 2 CURSOR плюс цифры: у Городецкого обе раскладки дают
+            ; стрелкам ОДНИ И ТЕ ЖЕ биты (влево 0, вправо 1, вверх 2, вниз 4), пробел — прыжок,
+            ; и отличается только «взять»: в directional это цифры (бит 5), в cursor — «вниз».
+            ; Поэтому t3 — это t2 с одной лишней записью впереди, а не вторая копия списка.
+        DB low (vec_kbmat+2), 0xFF, 0x20   ; 0..7          -> взять (directional: бит 5)
+a8_in_t2:   ; 2 CURSOR: стрелки влево/вправо поворот, вверх вперёд, пробел прыжок, вниз взять
+        DB low (vec_kbmat+0), 0x10, 0x01   ; стрелка влево
+        DB low (vec_kbmat+0), 0x40, 0x02   ; стрелка вправо
+        DB low (vec_kbmat+0), 0x20, 0x04   ; стрелка вверх
+        DB low (vec_kbmat+0), 0x80, 0x10   ; стрелка вниз
+        DB low (vec_kbmat+7), 0x80, 0x08   ; пробел
+        DB 0
+        ASSERT (low vec_kbmat) != 0   ; 0 — признак конца таблицы раскладки
+"""
+
+A8_PAUSE_VEC = """audio_CE22:   ; ПАУЗА. Оригинал: ПРОБЕЛ (ряд ZX 0+7, бит 0) и ни одной другой клавиши тех же
+        ; рядов (`and 0x1E : ret nz`). На Векторе пробел стал прыжком в раскладках 2 и 3, и пауза
+        ; переехала на ВК — как у Городецкого. Матрицу читаем НАПРЯМУЮ: гонять read_port ради
+        ; маски одного ряда не за чем. Защита оригинала сохранена дословно: ВК лежит в ряду 0
+        ; ВМЕСТЕ СО СТРЕЛКАМИ (клавиши движения раскладок 2 и 3), и без проверки «ни одной
+        ; стрелки» ходьба ставила бы ложную паузу — а выглядит она ровно как зависание (Knight
+        ; Lore, 65962fe). Ожидание отпускания/нажатия смотрит только на ВК, как в оригинале.
+        ld a, (vec_kbmat+0)
+        and 0xF4        ; ВК (0x04) + стрелки (0x10 0x20 0x40 0x80)
+        cp 4
+        ret nz
+a8_pz_rel:
+        ld a, (vec_kbmat+0)
+        and 4
+        jr nz, a8_pz_rel
+        call toggle_FE_bit4_x24
+a8_pz_wait:
+        ld a, (vec_kbmat+0)
+        and 4
+        jr z, a8_pz_wait
+a8_pz_rel2:
+        ld a, (vec_kbmat+0)
+        and 4
+        jr nz, a8_pz_rel2
+        jp toggle_FE_bit4_x24
+        ; End of function audio_CE22
+"""
+
+
+def a8_cut_controls(src, vec=False):
+    """Варианты ввода ZX (Kempston, курсорный джойстик, Interface II) вырезаны — на Векторе
+    только клавиатура. Меню повторяет порт Городецкого (caglrc.cc/scalar/ware/558): шесть строк —
+    заголовок, три режима управления, «0 START GAME», копирайт; выбранный режим подсвечен
+    цветной полосой. Копирайт ОРИГИНАЛЬНЫЙ («© 1985 A.C.G.»): это порт, а не подмена авторства.
+
+        1 KEYBOARD              клавиши оригинала Alien 8 (Z C M B / X V N / A..L / Q..Y / цифры)
+        2 CURSOR                стрелки влево/вправо поворот, вверх вперёд, пробел прыжок, вниз взять
+        3 DIRECTIONAL CONTROL   стрелки = стороны света, пробел прыжок, цифры 0..7 взять
+
+    user_input_method: 0 / 4 / 8 (бит 3 = directional, как в оригинале; 0 у режима 1 ОБЯЗАТЕЛЕН —
+    ячейка сравнивается в локстепе, на ZX там 0). Номер режима 0..2 живёт в tmp_input_method:
+    ячейка освободилась (её читал только «сменился ли режим» в меню) и лежит ВЫШЕ objs_wiped_cnt,
+    то есть НЕ обнуляется между заходами — режим переживает игру, как old_input_method у KL.
+
+    Меню на обеих целях одинаковое; ввод и пауза через матрицу Вектора — только vec (`vec=True`),
+    на цели lockstep остаётся оригинальный `keyboard:` по рядам ZX, и локстеп судит ту же логику."""
+    def cut(pat, name, repl='', flags=re.S, count=1):
+        nonlocal src
+        src, n = re.subn(pat, lambda m: repl, src, count=count, flags=flags)
+        assert n == count, "a8_cut_controls: %s (%d)" % (name, n)
+
+    # ---- меню: 6 строк вместо 8 ----
+    # Y с шагом 24 (как у Городецкого), X строк режимов 48 — как в оригинале: самая длинная
+    # («3 DIRECTIONAL CONTROL», 21 знак) встаёт по центру кадра. Заголовок и копирайт — на своих
+    # исходных местах. Цвета на Векторе не нужны (атрибутов нет), но display_text_list читает по
+    # байту на строку — их должно быть ровно 6.
+    cut(r'menu_colours:\n        DB 0x43, 0x44, 0x44, 0x44, 0x44, 0x45, 0x47, 0x47\n', 'menu_colours',
+        'menu_colours:\n        DB 0x43, 0x44, 0x44, 0x45, 0x47, 0x47\n')
+    cut(r'menu_xy:\n(?:        DB 0x[0-9A-F]{2}, 0x[0-9A-F]{2}\n){8}', 'menu_xy',
+        'menu_xy:\n'
+        '        DB 104, 159   ; ALIEN 8 (на исходном месте)\n'
+        '        DB 48, 135    ; 1 KEYBOARD\n'
+        '        DB 48, 111    ; 2 CURSOR\n'
+        '        DB 48, 87     ; 3 DIRECTIONAL CONTROL\n'
+        '        DB 48, 63     ; 0 START GAME\n'
+        '        DB 80, 39     ; (c) 1985 A.C.G. (на исходном месте)\n')
+    # строки: «3 DIRECTIONAL CONTROL» — оригинальная (сменён только номер), «2 CURSOR» набрана
+    # заново. Шрифт ASCII, бит 7 последнего байта = конец строки.
+    cut(r'a2KempstonJoystick:\n.*?(?=a0StartGame:)', 'строки режимов',
+        'a2Cursor:\n        DB "2 CURSO"\n        DB 0xD2\n'
+        'a3DirectionalControl:\n        DB "3 DIRECTIONAL CONTRO"\n        DB 0xCC\n')
+    src, _n = re.subn(r'(display_menu:\n(?:[^\n]*\n){4}        ld b, )8\n', r'\g<1>6\n', src, count=1)
+    assert _n == 1, 'a8_cut_controls: display_menu b'
+
+    # ---- вход в меню: рамка и выгрузка на экран как в оригинале, затем полоса подсветки ----
+    # Цикл `res 7,(hl)` по menu_colours снимал мерцание выбранной строки (атрибут FLASH) — на
+    # Векторе атрибутов нет, а подсветка теперь своя.
+    cut(r'do_menu_selection:\n        xor a\n        ld \(suppress_border\), a\n'
+        r'        ld hl, menu_colours\n        ld b, 8\nloc_BA87:\n        res 7, \(hl\)\n'
+        r'        inc hl\n        djnz loc_BA87\n        call clear_scrn_buffer\n'
+        r'        call display_menu\n        call flash_menu\n', 'do_menu_selection head',
+        'do_menu_selection:\n        xor a\n        ld (suppress_border), a\n'
+        '        call clear_scrn_buffer\n'
+        '        call display_menu   ; текст, рамка, выгрузка на экран\n'
+        '        call a8_setmode     ; режим + полоса подсветки\n')
+    # ---- цикл меню: клавиши 1/2/3 выбирают режим, «0» — старт ----
+    # Полоса живёт в ПЛОСКОСТИ 0 и между кадрами никем не трогается: display_menu в цикле пишет
+    # только в буфер (suppress_border уже взведён, update_screen второй раз не зовётся).
+    cut(r"        ld a, 0xF7   ; '÷'\n        call read_key\n        ld e, a\n"
+        r".*?        ; End of function do_menu_selection\n", 'menu loop tail',
+        "        ld a, 0xF7   ; ряд ZX 3: клавиши 1..5\n"
+        "        call read_key\n"
+        "        and 7               ; '1' / '2' / '3' — режим управления\n"
+        "        jr z, a8_ctl_done\n"
+        "        ld b, 0xFF          ; B = номер младшего нажатого бита (and 7 обнулил перенос)\n"
+        "a8_ctl_idx:\n"
+        "        inc b\n"
+        "        rra\n"
+        "        jr nc, a8_ctl_idx\n"
+        "        ld hl, tmp_input_method   ; номер режима 0..2 (переживает игру)\n"
+        "        ld a, b\n"
+        "        cp (hl)\n"
+        "        jr z, a8_ctl_done   ; тот же режим — экран не трогаем\n"
+        "        ld (hl), a\n"
+        "        call a8_setmode\n"
+        "a8_ctl_done:\n"
+        "        ld a, 0xEF          ; ряд ZX 4: клавиши 0,9,8,7,6\n"
+        "        call read_key\n"
+        "        bit 0, a            ; '0' — начать игру\n"
+        "        jp nz, a8_menu_exit\n"
+        "        ld hl, seed_1\n"
+        "        inc (hl)\n"
+        "        jp menu_loop\n"
+        "        ; End of function do_menu_selection\n")
+    cut(r'flash_menu:\n.*?        ; End of function flash_menu\n', 'flash_menu',
+        A8_SETMODE_VEC if vec else
+        'a8_setmode:\n        ret   ; полоса подсветки — только цель vec (плоскость 0 + палитра)\n'
+        'a8_menu_exit:\n        ret\n')
+    cut(r'toggle_selected:\n.*?        ; End of function toggle_selected\n', 'toggle_selected')
+
+    # ---- ввод: только клавиатура ----
+    # Диспетчер вариантов ZX и три их обработчика долой; бит 3 (directional) работает теперь
+    # сам по себе — в оригинале он проверялся ТОЛЬКО вместе с джойстиком (`and 6`).
+    cut(r'        ld a, \(user_input_method\)\n        rrca\n        and 3\n'
+        r'        jp z, keyboard\n.*?(?=keyboard:\n)', 'диспетчер вариантов ввода')
+    cut(r'chk_pickup_drop:\n        ld hl, user_input_method\n        ld a, \(hl\)\n'
+        r'        and 6\n        ld a, \(user_input\)\n        jr z, loc_BD68\n'
+        r'        bit 3, \(hl\)\n        jr z, loc_BD68\n', 'chk_pickup_drop',
+        'chk_pickup_drop:\n        ld hl, user_input_method\n'
+        '        bit 3, (hl)   ; directional: «взять» в бите 5 (у оригинала ещё and 6 — джойстик)\n'
+        '        ld a, (user_input)\n        jr z, loc_BD68\n')
+    cut(r'handle_left_right:\n        ld hl, user_input_method\n        ld a, \(hl\)\n'
+        r'        and 6\n        jr z, loc_C18F\n        bit 3, \(hl\)\n        jr z, loc_C18F\n',
+        'handle_left_right',
+        'handle_left_right:\n        ld hl, user_input_method\n'
+        '        bit 3, (hl)   ; directional (у оригинала ещё and 6 — джойстик)\n'
+        '        jr z, loc_C18F\n')
+    if vec:
+        # Ряды ZX для игрока не годятся: у оригинала «вперёд» — это ZX ENTER, а на Векторе ВК
+        # отдана паузе; сами ряды остаются для меню, «любой клавиши» в мелодиях и read_key.
+        cut(r'keyboard:\n.*?        ; End of function check_user_input\n', 'keyboard -> матрица Вектора',
+            A8_VEC_INPUT)
+        cut(r'        jp nz, finished_input\n', 'ранний выход check_user_input',
+            '        jp nz, a8_in_store   ; конец игры: ввод не читаем (C = 0)\n')
+        assert 'finished_input' not in src, 'остались ссылки на finished_input'
+        cut(r'audio_CE22:\n.*?        ; End of function audio_CE22\n', 'пауза', A8_PAUSE_VEC)
+    return src
+
+
 def a8_no_delay(src):
     """Искусственная задержка оригинала (B * 0x300 пустых витков при < 6 нарисованных объектов).
 
@@ -1203,6 +1485,9 @@ def a8_vec_glue(src):
 
 
 def a8_glue(src, target):
+    # меню и вырезание вариантов ввода ZX — ОБЕИМ целям (иначе локстеп судил бы чужое меню);
+    # ввод через матрицу Вектора и пауза на ВК — только vec
+    src = a8_cut_controls(src, vec=(target == 'vec'))
     if target == 'vec':
         return a8_vec_glue(src)
     assert target == 'lockstep', target
