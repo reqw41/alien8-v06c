@@ -813,26 +813,42 @@ bts_srow:		ld		a, (hl)
 				ret
 
 ; ---- весь буфер (строки 32..223 всех 32 столбцов) -> плоскость 0 ----
-update_screen:	ld		b, 32
-				ld		h, high vidbuf
-us_col:			ld		a, h
+; СТЕКОВАЯ ВЕРСИЯ, столбец за столбцом: SP = начало окна в столбце буфера, pop забирает 2 байта
+; за 10 тактов, приёмник — через HL: 34 такта на 2 байта против 78 у байтового цикла (17 против
+; 39 на байт). Буфер НЕ обнуляется: оригинал Alien 8 (0xCE8B) просто копирует ldir'ом, в отличие
+; от Knight Lore, где update_screen заодно чистил буфер.
+; SP уходит в картинку => столбец идёт под di, стек игры — в us_sp, бюджет — на столбец.
+update_screen:	ld		hl, 0
+				add		hl, sp
+				ld		(us_sp), hl			; стек игры на время захвата SP
+				ld		c, high vidbuf		; C = страница столбца буфера
+us_col:			ld		a, c
+				ld		(us_src+1), a
 				sub		0x20				; буфер -> экран
-				ld		d, a
+				ld		(us_dst+1), a		; страница плоскости 0
+				ld		de, 2432			; бюджет столбца в тиках ВИ53 (факт по distat_vec: 2274,
+											; разброса нет — столбец всегда полный, 192 байта)
+				call	vec_di_budget
+				di
+us_src:			ld		h, 0				; патч: страница буфера
 				ld		l, 32
-				ld		e, 32
-				push	bc
-				ld		b, 192
-us_row:			ld		a, (hl)
-				ld		(de), a
-				inc		l
-				inc		e
+				ld		sp, hl				; SP = источник, pop идёт вверх по окну
+us_dst:			ld		h, 0				; патч: страница экрана
+				ld		l, 32				; HL = приёмник
+				ld		b, 12				; 12 * 8 * 2 = 192 строки
+us_row:
+__A8_US_CHAIN__
 				dec		b
 				jp		nz, us_row
-				pop		bc
-				inc		h
-				dec		b
+				ld		hl, (us_sp)
+				ld		sp, hl
+				ei
+				inc		c
+				ld		a, c
+				cp		high vidbuf + 32	; за столбцом 31 — стоп
 				jp		nz, us_col
 				ret
+us_sp:			DS		2					; стек игры на время захвата SP
 
 ; ---- read_key: A = маска рядов ZX -> A = cpl(AND рядов) and 0x1F, как в оригинале ----
 ; Ряды ZX готовит ISR (vec_zxbuild) раз в кадр, ответы для живых масок посчитаны вперёд
@@ -1129,6 +1145,9 @@ def tail():
     t = t.replace("__VEC_KBZX__", _kbzx_table(t), 1)
     # цепочки развёрнутых стековых операций (§12): вход считается по высоте окна, см. fill_window
     t = _sub(t, r'^__A8_FW_CHAIN__\n', "fw_ch:\n" + "\t\t\t\tpush\tde\n" * 16, 'цепочка fw')
+    t = _sub(t, r'^__A8_US_CHAIN__\n',
+             "\t\t\t\tpop\t\tde\n\t\t\t\tld\t\t(hl), e\n\t\t\t\tinc\t\tl\n"
+             "\t\t\t\tld\t\t(hl), d\n\t\t\t\tinc\t\tl\n" * 8, 'цепочка us')
     t = _sub(t, r'^__A8_BTS_CHAIN__\n',
              "bts_ch:\n" + "\t\t\t\tpop\t\tde\n\t\t\t\tld\t\t(hl), e\n\t\t\t\tinc\t\tl\n"
              "\t\t\t\tld\t\t(hl), d\n\t\t\t\tinc\t\tl\n" * 16, 'цепочка bts')
