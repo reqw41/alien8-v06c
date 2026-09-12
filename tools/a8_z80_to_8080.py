@@ -1029,6 +1029,46 @@ def a8_no_delay(src):
     return src.replace(old, "        ; A8: искусственная задержка оригинала снята (a8_no_delay)\n", 1)
 
 
+_PACE_BLOCK = re.compile(r'(?m)^;__PACE_BEG__\n.*?^;__PACE_END__\n', re.S)
+
+
+def a8_pace(src):
+    """Потолок темпа (цель `vec`): итерация главного цикла не короче заданного времени.
+
+    A8PACE — потолок в итерациях в секунду; по умолчанию 28.5 = МАКСИМУМ оригинала ZX по
+    шести замеренным комнатам (замер build/zxpace.lua на стенде MAME: 19 → 25.2, 104 → 28.5,
+    39 → 25.5, 56 → 13.4, 88 → 8.7, 48 → 7.7 итер/с). A8PACE=off — ограничителя нет вовсе:
+    весь помеченный код и `call` снимаются, ROM байт в байт равен сборке без правки.
+
+    Вариант А рецепта KL §19 (вариант Б — «длительность всегда целое число кадров» — там
+    отвергнут числами: в тяжёлых комнатах он снимает до 7.5 % темпа и сглаженности не даёт).
+    Возвращает (src, описание).
+    """
+    env = os.environ.get('A8PACE', '28.5').strip().lower()
+    if env in ('off', 'no', 'none', '0', ''):
+        src, n = _PACE_BLOCK.subn('', src)
+        assert n == 3, 'блоков ограничителя темпа должно быть три, найдено %d' % n
+        return src, 'выключен (A8PACE=off)'
+    rate = float(env)
+    FPS = 3000000.0 / 59904.0          # кадр Вектора = 59904 такта на 3 МГц -> 50.08 Гц
+    period = FPS / rate
+    pint = int(period)
+    pfrc = int(round((period - pint) * 256))
+    if pfrc == 256:
+        pint, pfrc = pint + 1, 0
+    assert 0 <= pint <= 255, 'потолок темпа вне диапазона'
+    src = _PACE_BLOCK.sub(lambda m: m.group(0).replace(';__PACE_BEG__\n', '').replace(';__PACE_END__\n', ''), src)
+    src = src.replace("vec_pace:\t\t",
+                      "PACE_INT\t\tequ\t\t%d\t\t\t; потолок темпа: целых кадров на итерацию\n"
+                      "PACE_FRC\t\tequ\t\t%d\t\t\t; и дробь, 1/256 кадра (%.1f итер/с)\n"
+                      "vec_pace:\t\t" % (pint, pfrc, rate), 1)
+    old = "onscreen_loop:\n"
+    assert src.count(old) == 1, 'onscreen_loop'
+    src = src.replace(old, old + "        call vec_pace   ; A8: потолок темпа (вариант А)\n", 1)
+    eff = FPS / (pint + pfrc / 256.0)
+    return src, '%d+%d/256 кадра = %.2f итер/с' % (pint, pfrc, eff)
+
+
 def a8_logic_fixes(src):
     """Самомодифицирующийся код ЛОГИКИ -> переменные (три сайта, см. docs/PORT_RECIPE.md).
 
@@ -1280,6 +1320,9 @@ def main():
     src = open(inp, encoding='utf-8').read()
     src = a8_no_delay(src)             # обе цели: состояние не меняется, локстеп это судит
     src = a8_glue(src, target)
+    pace_desc = None
+    if target == 'vec':
+        src, pace_desc = a8_pace(src)  # потолок темпа: только цель vec (нужен ISR Вектора)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
     src = a8_native_logic.apply(src)
@@ -1293,7 +1336,8 @@ def main():
                          src, count=1, flags=re.M)
         assert n == 1, 'место для IX-хелперов'
     open(outp, 'w', encoding='utf-8').write(src)
-    print(f'{inp} -> {outp} (цель {target}); IX-хелперов {len(_ix_used)}; exx-пар {exx_pairs}')
+    print(f'{inp} -> {outp} (цель {target}); IX-хелперов {len(_ix_used)}; exx-пар {exx_pairs}'
+          + (f'; ограничитель темпа: {pace_desc}' if pace_desc else ''))
 
 
 if __name__ == '__main__':
