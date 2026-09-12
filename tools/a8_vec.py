@@ -989,8 +989,8 @@ def glue(src):
     # ---------------- ЖЕЛЕЗО ZX ----------------
     # бипер и бордюр: звук этапа 5 (MSX -> AY/ВИ53), пока молчим
     src = _sub(src, r'^        out \(0xFE\), a\n', "", 'out (0xFE)', count=5)
-    # Kempston: джойстика нет
-    src = _sub(src, r'^        in a, \(0x1F\)\n', "        ld a, 0   ; Kempston: джойстика нет\n", 'kempston')
+    # Kempston читать нечем и не надо: обработчик вырезан целиком (a8_cut_controls)
+    assert 'in a, (0x1F)' not in src, 'остался опрос Kempston'
     # старый read_key (ULA) — долой, новый в блоке Вектора
     src = _sub(src, r'^read_key:\n.*?; End of function read_key\n', "", 'read_key', flags=re.M|re.S)
     # очистка «экрана ZX» -> плоскость 0
@@ -1132,7 +1132,14 @@ def hooks(src):
                "        ld a, (curr_room_attrib)   ; палитра комнаты — вместе с картинкой\n"
                "        call vec_set_pal\n", 'палитра комнаты')
     src = _sub(src, r'^do_menu_selection:\n',
-               "do_menu_selection:\n        ld a, 7   ; меню белое\n        call vec_set_pal\n", 'палитра меню')
+               "do_menu_selection:\n        ld a, 7   ; меню белое\n        call vec_set_pal\n"
+               "        ld a, 0xC0   ; ФОН ПОЛОСЫ ПОДСВЕТКИ — синий. Индексы 8..11 = p0=1, p1=0:\n"
+               "        ld (vec_pal+8), a    ; точка ЕСТЬ на экране, но НЕТ в буфере — так набита\n"
+               "        ld (vec_pal+9), a    ; заливка полосы (a8_setmode). Индексы 12..15\n"
+               "        ld (vec_pal+10), a   ; (p0=1, p1=1) остаются белыми: буквы и рамка есть\n"
+               "        ld (vec_pal+11), a   ; и на экране, и в буфере.\n"
+               "        ld a, 1              ; перезапросить палитру: свой запрос vec_set_pal\n"
+               "        ld (vec_palreq), a   ; мог уже унести ISR\n", 'палитра меню')
     return src
 
 
