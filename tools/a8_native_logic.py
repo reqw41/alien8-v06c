@@ -99,6 +99,7 @@ _BODIES = [
     ('do_objs_intersect_on_x', 'N_INTERSECT_X'),
     ('is_object_not_ignored', 'N_NOT_IGNORED'),
     ('do_objs_intersect_on_z', 'N_INTERSECT_Z'),
+    ('do_objs_intersect_on_y', 'N_INTERSECT_Y'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -1319,4 +1320,52 @@ doi_z2:
 		pop hl
 		ret
         ; End of function do_objs_intersect_on_z
+"""
+
+
+# ---------------------------------------------------------------------------
+# do_objs_intersect_on_y — 1.4 % тактов комнаты 48 (9.7 вызова, 1096 тактов на вызов).
+# Зеркало оси X: четыре обращения (ix+5), (iy+5), (ix+2), (iy+2). Отличие одно —
+# параметр dY приходит в L, то есть в том самом регистре, который сейчас станет
+# указателем, поэтому снимается ДО загрузки (`ld d, l`).
+# Сохранность и флаги — как у do_objs_intersect_on_x.
+# 1096 тактов на вызов -> 219.
+# ---------------------------------------------------------------------------
+N_INTERSECT_Y = """do_objs_intersect_on_y:
+		ASSERT (graphic_objs_tbl & 31) <= 26	; иначе l+5 переносит
+		push hl
+		push de
+		ld d, l				; D = dY (параметр приходит в L)
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 2
+		ld l, a				; -> +2 Y
+		ld a, (hl)
+		add a, d			; Y своего объекта + dY
+		ld d, a
+		inc l
+		inc l
+		inc l				; -> +5 полувысота своего
+		ld e, (hl)
+		ld hl, (z80_iy)
+		ld a, l
+		add a, 5
+		ld l, a				; -> +5
+		ld a, e
+		add a, (hl)
+		ld e, a				; E = сумма полувысот
+		dec l
+		dec l
+		dec l				; -> +2
+		ld a, d
+		sub (hl)
+		jp p, doi_y1
+		cpl
+		inc a				; neg
+doi_y1:
+		sub e
+		pop de				; POP rp флагов не трогает
+		pop hl
+		ret
+        ; End of function do_objs_intersect_on_y
 """
