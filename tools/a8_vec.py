@@ -658,6 +658,15 @@ fw_srow:		ld		(hl), d
 				jp		fw_ret
 
 ; ---- блит буфер -> экран: HL = буфер, DE = экран, B = строк, C = ширина (столбцов) ----
+; СТЕКОВЫЙ БЛИТ (§12 рецепта KL): SP наводится на начало окна в столбце буфера, pop забирает
+; 2 байта за 10 тактов, приёмник адресуется через HL — 17 тактов на байт против 39 у байтового
+; цикла. Число pop на столбец известно на входе, поэтому цепочка из 16 блоков развёрнута целиком,
+; а вход в неё считается ОДИН раз на вызов: вход = конец − 5*N (блок цепочки 5 байт, НЕ 1 —
+; «конец − N» разъезжает картинку). SP уходит в картинку => блок под di, стек игры в bts_sp.
+; Смещения окна в буфере (L) и на экране (E) патчатся ПОРОЗНЬ: у всех вызовов они совпадают
+; (calc_screen_buffer_addr и BC_to_Attr_In_DE считаются от одного BC), но зависимости нет.
+; Байтовым циклом без di остаются окна выше 32 строк и окна, чей конец переваливает за конец
+; страницы буфера (у байтового цикла inc l заворачивается внутри столбца, у SP — нет).
 blit_to_screen:
 				inc		b
 				dec		b
@@ -670,15 +679,87 @@ blit_to_screen:
 				ret		c
 				cp		high vidbuf + 32
 				ret		nc
-bts_col:		push	bc
+				ld		a, b
+				cp		33
+				jp		nc, bts_slow		; окно выше цепочки
+				ld		a, l
+				add		a, b
+				jp		c, bts_slow			; конец окна за страницей — SP ушёл бы в чужой столбец
+				ld		a, l
+				ld		(bts_off+1), a		; смещение окна в столбце буфера
+				ld		a, e
+				ld		(bts_soff+1), a		; смещение окна в столбце экрана
+				ld		a, h
+				ld		(bts_pg+1), a		; страница буфера
+				sub		d
+				ld		(bts_dif+1), a		; страница экрана = страница буфера минус это
+				ld		a, b
+				or		a
+				rra							; A = число pop, CY = нечётная высота
+				ld		b, a
+				ld		hl, bts_next
+				jp		nc, bts_ev
+				ld		hl, bts_lo
+bts_ev:			ld		(bts_odd+1), hl		; хвост столбца: последний байт или пропуск
+				ld		a, b				; блок цепочки — 5 байт, считаем 5*pop
+				add		a, a
+				add		a, a
+				add		a, b
+				ld		b, a
+				ld		hl, bts_pend
+				ld		a, l
+				sub		b
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a
+				ld		(bts_go+1), hl		; вход в цепочку = конец минус 5*число pop
+				ld		hl, 0
+				add		hl, sp
+				ld		(bts_sp), hl		; стек игры
+				ld		h, c				; бюджет кадра: 512 тиков ВИ53 на столбец.
+				ld		l, 0				; Факт по слотам шины: столбец = 11h+64 тика,
+				add		hl, hl				; при h <= 32 (условие быстрого пути) это <= 416 < 512
+				ex		de, hl
+				call	vec_di_budget
+				di
+bts_pg:			ld		b, 0				; патч: страница буфера
+bts_col:		ld		h, b
+bts_off:		ld		l, 0				; патч: смещение окна в буфере
+				ld		sp, hl				; SP = источник, pop идёт вверх по столбцу
+				ld		a, b
+bts_dif:		sub		0x20				; патч: буфер -> экран
+				ld		h, a
+bts_soff:		ld		l, 0				; патч: смещение окна на экране
+bts_go:			jp		bts_pend			; патч: вход в цепочку
+__A8_BTS_CHAIN__
+bts_pend:
+bts_odd:		jp		bts_next			; патч: bts_next или bts_lo
+bts_lo:			pop		de					; нечётная высота: последний байт (D не нужен)
+				ld		(hl), e
+bts_next:		inc		b
+				ld		a, b
+				cp		high vidbuf + 32	; за столбцом 31 — стоп
+				jp		z, bts_done
+				dec		c
+				jp		nz, bts_col
+bts_done:		ld		hl, (bts_sp)
+				ld		sp, hl
+				ei
+				ret
+bts_sp:			DS		2					; стек игры на время захвата SP
+
+; окно выше 32 строк (или с концом за страницей): прежний байтовый цикл, SP не трогаем
+bts_slow:
+bts_scol:		push	bc
 				push	hl
 				push	de
-bts_row:		ld		a, (hl)
+bts_srow:		ld		a, (hl)
 				ld		(de), a
 				inc		l
 				inc		e
 				dec		b
-				jp		nz, bts_row
+				jp		nz, bts_srow
 				pop		de
 				pop		hl
 				pop		bc
@@ -688,7 +769,7 @@ bts_row:		ld		a, (hl)
 				cp		high vidbuf + 32	; за столбцом 31 — стоп
 				ret		z
 				dec		c
-				jp		nz, bts_col
+				jp		nz, bts_scol
 				ret
 
 ; ---- весь буфер (строки 32..223 всех 32 столбцов) -> плоскость 0 ----
@@ -1008,4 +1089,7 @@ def tail():
     t = t.replace("__VEC_KBZX__", _kbzx_table(t), 1)
     # цепочки развёрнутых стековых операций (§12): вход считается по высоте окна, см. fill_window
     t = _sub(t, r'^__A8_FW_CHAIN__\n', "fw_ch:\n" + "\t\t\t\tpush\tde\n" * 16, 'цепочка fw')
+    t = _sub(t, r'^__A8_BTS_CHAIN__\n',
+             "bts_ch:\n" + "\t\t\t\tpop\t\tde\n\t\t\t\tld\t\t(hl), e\n\t\t\t\tinc\t\tl\n"
+             "\t\t\t\tld\t\t(hl), d\n\t\t\t\tinc\t\tl\n" * 16, 'цепочка bts')
     return t
