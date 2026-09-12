@@ -594,6 +594,16 @@ BC_to_Attr_In_DE:			; BC = (B = Y, C = X) -> DE = адрес в плоскост
 ; Нулевой размер — выход (иначе 256 столбцов затирают память). Окно вне буфера — пустая
 ; операция: по этим адресам игра пишет АТРИБУТЫ ZX (colour_panel, colour_something),
 ; в ч/б их писать некуда. Вылет за столбец 31 обрезается: за ним чужая память.
+; СТЕКОВАЯ ЗАЛИВКА (§12 рецепта KL): столбец буфера сплошной, поэтому SP наводится на конец
+; окна и push кладёт 2 байта за 11 тактов — 5.5 такта/байт против 27 у байтового цикла.
+; Число push на столбец известно на входе, поэтому цепочка из 16 push развёрнута целиком,
+; а вход в неё и хвост нечётной высоты считаются ОДИН раз на вызов патчем иммедиатов.
+; SP уходит в картинку => весь блок под di (иначе ISR положит свои регистры в буфер),
+; стек игры на это время — в fw_sp.
+; Байтовым циклом (без di) остаются два случая:
+;   - окно выше цепочки (строк > 32);
+;   - конец окна переваливает за конец страницы: у байтового цикла inc l заворачивается внутри
+;     столбца, а SP ушёл бы в соседний столбец. (Сейчас не встречается: строки буфера 32..223.)
 fill_window:
 				inc		b
 				dec		b
@@ -603,30 +613,100 @@ fill_window:
 				ret		z
 				push	af
 				ld		d, a				; D = значение заливки
+				ld		e, a				; оба байта пары
 				ld		a, h
 				cp		high vidbuf
 				jp		c, fw_ret			; ниже буфера — это адрес атрибута ZX, писать некуда
 				cp		high vidbuf + 32
 				jp		nc, fw_ret			; выше буфера
-				ld		e, l				; E = первая строка окна
-fw_col:			ld		l, e
+				ld		a, c
+				cp		33
+				jp		nc, fw_slow			; окно выше цепочки
+				ld		a, l
+				ld		(fw_lo+1), a		; нижняя строка окна (хвост нечётной высоты)
+				add		a, c
+				jp		c, fw_slow			; конец окна за страницей — SP ушёл бы в чужой столбец
+				ld		(fw_end+1), a		; конец окна = SP на входе в столбец
+				ld		a, h
+				ld		(fw_pg+1), a		; страница первого столбца
+				ld		a, c
+				or		a
+				rra							; A = число push, CY = нечётная высота
+				ld		c, a				; высота дальше не нужна
+				ld		hl, fw_next
+				jp		nc, fw_ev
+				ld		hl, fw_lo
+fw_ev:			ld		(fw_odd+1), hl		; хвост столбца: нижний байт или пропуск
+				ld		hl, fw_pend			; блок цепочки — 1 байт (push de)
+				ld		a, l
+				sub		c
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a
+				ld		(fw_ent+1), hl		; вход в цепочку = конец минус число push
+				ld		hl, 0
+				add		hl, sp
+				ld		(fw_sp), hl			; стек игры
+				ld		c, b				; C = столбцов (B занят страницей столбца)
+				push	de					; бюджет кадра: 256 тиков ВИ53 на столбец.
+				ld		d, c				; Факт по слотам шины: столбец = 4h+56 тиков,
+				ld		e, 0				; при h <= 32 (условие быстрого пути) это <= 184 < 256
+				call	vec_di_budget
+				pop		de
+				di
+fw_pg:			ld		b, 0				; патч: страница столбца
+fw_col:			ld		h, b
+fw_end:			ld		l, 0				; патч: конец окна
+				ld		sp, hl				; push пойдёт вниз по столбцу
+fw_ent:			jp		fw_pend				; патч: вход в цепочку
+__A8_FW_CHAIN__
+fw_pend:
+fw_odd:			jp		fw_next				; патч: fw_next или fw_lo
+fw_lo:			ld		l, 0				; патч: нижняя строка окна
+				ld		h, b
+				ld		(hl), d
+fw_next:		inc		b
+				ld		a, b
+				cp		high vidbuf + 32	; за столбцом 31 — стоп
+				jp		z, fw_done
+				dec		c
+				jp		nz, fw_col
+fw_done:		ld		hl, (fw_sp)
+				ld		sp, hl
+				ei
+fw_ret:			pop		af
+				ret
+fw_sp:			DS		2					; стек игры на время захвата SP
+
+; окно выше 32 строк (или с концом за страницей): прежний байтовый цикл, SP не трогаем
+fw_slow:		ld		e, l				; E = первая строка окна
+fw_scol:		ld		l, e
 				push	bc
 				ld		b, c				; строк в столбце
-fw_row:			ld		(hl), d
+fw_srow:		ld		(hl), d
 				inc		l
 				dec		b
-				jp		nz, fw_row
+				jp		nz, fw_srow
 				pop		bc
 				inc		h
 				ld		a, h
 				cp		high vidbuf + 32	; за столбцом 31 — стоп
 				jp		z, fw_ret
 				dec		b
-				jp		nz, fw_col
-fw_ret:			pop		af
-				ret
+				jp		nz, fw_scol
+				jp		fw_ret
 
 ; ---- блит буфер -> экран: HL = буфер, DE = экран, B = строк, C = ширина (столбцов) ----
+; СТЕКОВЫЙ БЛИТ (§12 рецепта KL): SP наводится на начало окна в столбце буфера, pop забирает
+; 2 байта за 10 тактов, приёмник адресуется через HL — 17 тактов на байт против 39 у байтового
+; цикла. Число pop на столбец известно на входе, поэтому цепочка из 16 блоков развёрнута целиком,
+; а вход в неё считается ОДИН раз на вызов: вход = конец − 5*N (блок цепочки 5 байт, НЕ 1 —
+; «конец − N» разъезжает картинку). SP уходит в картинку => блок под di, стек игры в bts_sp.
+; Смещения окна в буфере (L) и на экране (E) патчатся ПОРОЗНЬ: у всех вызовов они совпадают
+; (calc_screen_buffer_addr и BC_to_Attr_In_DE считаются от одного BC), но зависимости нет.
+; Байтовым циклом без di остаются окна выше 32 строк и окна, чей конец переваливает за конец
+; страницы буфера (у байтового цикла inc l заворачивается внутри столбца, у SP — нет).
 blit_to_screen:
 				inc		b
 				dec		b
@@ -639,15 +719,87 @@ blit_to_screen:
 				ret		c
 				cp		high vidbuf + 32
 				ret		nc
-bts_col:		push	bc
+				ld		a, b
+				cp		33
+				jp		nc, bts_slow		; окно выше цепочки
+				ld		a, l
+				add		a, b
+				jp		c, bts_slow			; конец окна за страницей — SP ушёл бы в чужой столбец
+				ld		a, l
+				ld		(bts_off+1), a		; смещение окна в столбце буфера
+				ld		a, e
+				ld		(bts_soff+1), a		; смещение окна в столбце экрана
+				ld		a, h
+				ld		(bts_pg+1), a		; страница буфера
+				sub		d
+				ld		(bts_dif+1), a		; страница экрана = страница буфера минус это
+				ld		a, b
+				or		a
+				rra							; A = число pop, CY = нечётная высота
+				ld		b, a
+				ld		hl, bts_next
+				jp		nc, bts_ev
+				ld		hl, bts_lo
+bts_ev:			ld		(bts_odd+1), hl		; хвост столбца: последний байт или пропуск
+				ld		a, b				; блок цепочки — 5 байт, считаем 5*pop
+				add		a, a
+				add		a, a
+				add		a, b
+				ld		b, a
+				ld		hl, bts_pend
+				ld		a, l
+				sub		b
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a
+				ld		(bts_go+1), hl		; вход в цепочку = конец минус 5*число pop
+				ld		hl, 0
+				add		hl, sp
+				ld		(bts_sp), hl		; стек игры
+				ld		h, c				; бюджет кадра: 512 тиков ВИ53 на столбец.
+				ld		l, 0				; Факт по слотам шины: столбец = 11h+64 тика,
+				add		hl, hl				; при h <= 32 (условие быстрого пути) это <= 416 < 512
+				ex		de, hl
+				call	vec_di_budget
+				di
+bts_pg:			ld		b, 0				; патч: страница буфера
+bts_col:		ld		h, b
+bts_off:		ld		l, 0				; патч: смещение окна в буфере
+				ld		sp, hl				; SP = источник, pop идёт вверх по столбцу
+				ld		a, b
+bts_dif:		sub		0x20				; патч: буфер -> экран
+				ld		h, a
+bts_soff:		ld		l, 0				; патч: смещение окна на экране
+bts_go:			jp		bts_pend			; патч: вход в цепочку
+__A8_BTS_CHAIN__
+bts_pend:
+bts_odd:		jp		bts_next			; патч: bts_next или bts_lo
+bts_lo:			pop		de					; нечётная высота: последний байт (D не нужен)
+				ld		(hl), e
+bts_next:		inc		b
+				ld		a, b
+				cp		high vidbuf + 32	; за столбцом 31 — стоп
+				jp		z, bts_done
+				dec		c
+				jp		nz, bts_col
+bts_done:		ld		hl, (bts_sp)
+				ld		sp, hl
+				ei
+				ret
+bts_sp:			DS		2					; стек игры на время захвата SP
+
+; окно выше 32 строк (или с концом за страницей): прежний байтовый цикл, SP не трогаем
+bts_slow:
+bts_scol:		push	bc
 				push	hl
 				push	de
-bts_row:		ld		a, (hl)
+bts_srow:		ld		a, (hl)
 				ld		(de), a
 				inc		l
 				inc		e
 				dec		b
-				jp		nz, bts_row
+				jp		nz, bts_srow
 				pop		de
 				pop		hl
 				pop		bc
@@ -657,30 +809,46 @@ bts_row:		ld		a, (hl)
 				cp		high vidbuf + 32	; за столбцом 31 — стоп
 				ret		z
 				dec		c
-				jp		nz, bts_col
+				jp		nz, bts_scol
 				ret
 
 ; ---- весь буфер (строки 32..223 всех 32 столбцов) -> плоскость 0 ----
-update_screen:	ld		b, 32
-				ld		h, high vidbuf
-us_col:			ld		a, h
+; СТЕКОВАЯ ВЕРСИЯ, столбец за столбцом: SP = начало окна в столбце буфера, pop забирает 2 байта
+; за 10 тактов, приёмник — через HL: 34 такта на 2 байта против 78 у байтового цикла (17 против
+; 39 на байт). Буфер НЕ обнуляется: оригинал Alien 8 (0xCE8B) просто копирует ldir'ом, в отличие
+; от Knight Lore, где update_screen заодно чистил буфер.
+; SP уходит в картинку => столбец идёт под di, стек игры — в us_sp, бюджет — на столбец.
+update_screen:	ld		hl, 0
+				add		hl, sp
+				ld		(us_sp), hl			; стек игры на время захвата SP
+				ld		c, high vidbuf		; C = страница столбца буфера
+us_col:			ld		a, c
+				ld		(us_src+1), a
 				sub		0x20				; буфер -> экран
-				ld		d, a
+				ld		(us_dst+1), a		; страница плоскости 0
+				ld		de, 2432			; бюджет столбца в тиках ВИ53 (факт по distat_vec: 2274,
+											; разброса нет — столбец всегда полный, 192 байта)
+				call	vec_di_budget
+				di
+us_src:			ld		h, 0				; патч: страница буфера
 				ld		l, 32
-				ld		e, 32
-				push	bc
-				ld		b, 192
-us_row:			ld		a, (hl)
-				ld		(de), a
-				inc		l
-				inc		e
+				ld		sp, hl				; SP = источник, pop идёт вверх по окну
+us_dst:			ld		h, 0				; патч: страница экрана
+				ld		l, 32				; HL = приёмник
+				ld		b, 12				; 12 * 8 * 2 = 192 строки
+us_row:
+__A8_US_CHAIN__
 				dec		b
 				jp		nz, us_row
-				pop		bc
-				inc		h
-				dec		b
+				ld		hl, (us_sp)
+				ld		sp, hl
+				ei
+				inc		c
+				ld		a, c
+				cp		high vidbuf + 32	; за столбцом 31 — стоп
 				jp		nz, us_col
 				ret
+us_sp:			DS		2					; стек игры на время захвата SP
 
 ; ---- read_key: A = маска рядов ZX -> A = cpl(AND рядов) and 0x1F, как в оригинале ----
 ; Ряды ZX готовит ISR (vec_zxbuild) раз в кадр, ответы для живых масок посчитаны вперёд
@@ -975,4 +1143,12 @@ def header():
 def tail():
     t = VEC_TAIL
     t = t.replace("__VEC_KBZX__", _kbzx_table(t), 1)
+    # цепочки развёрнутых стековых операций (§12): вход считается по высоте окна, см. fill_window
+    t = _sub(t, r'^__A8_FW_CHAIN__\n', "fw_ch:\n" + "\t\t\t\tpush\tde\n" * 16, 'цепочка fw')
+    t = _sub(t, r'^__A8_US_CHAIN__\n',
+             "\t\t\t\tpop\t\tde\n\t\t\t\tld\t\t(hl), e\n\t\t\t\tinc\t\tl\n"
+             "\t\t\t\tld\t\t(hl), d\n\t\t\t\tinc\t\tl\n" * 8, 'цепочка us')
+    t = _sub(t, r'^__A8_BTS_CHAIN__\n',
+             "bts_ch:\n" + "\t\t\t\tpop\t\tde\n\t\t\t\tld\t\t(hl), e\n\t\t\t\tinc\t\tl\n"
+             "\t\t\t\tld\t\t(hl), d\n\t\t\t\tinc\t\tl\n" * 16, 'цепочка bts')
     return t
