@@ -66,8 +66,13 @@ let phase="menu",iter=0; const lines=[];
 memory.write=function(a,w,s){a&=0xffff;
   if(WATCH&&a>=WATCH[0]&&a<=WATCH[1]&&wn++<30)console.log(`WATCH iter ${iter} pc=${cpu.pc.toString(16)} ${a.toString(16)} <- ${w.toString(16)} (was ${memory.read(a,false).toString(16)})`);
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
-  if(process.env.A8ROOM&&phase==="init"&&a>=0xA000&&a<0xC000&&memory.read(L.graphic_objs_tbl+8,false)!==0&&!g.roomSet){g.roomSet=true;ow(L.graphic_objs_tbl+8,+process.env.A8ROOM,false);ow(L.graphic_objs_tbl+40,+process.env.A8ROOM,false);}  // KLROOM: подмена комнаты при clear_scrn_buffer перед retrieve_screen (как в profile_vec.js)
-  if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
+  // A8ROOM=<байт>: подменить номер комнаты — ОДИНАКОВО с profile_vec.js и nobjcheck_vec.js.
+  // Номер лежит в поле +8 объектов 0 и 1 и пишется в init_start_location; retrieve_screen
+  // читает его позже (cp (ix+8)). Прежний способ (ловить первую запись в буфер 0xA000..0xC000
+  // и класть номер задним числом) для Alien 8 НЕ работает: к этому моменту номер уже прочитан.
+  if(process.env.A8ROOM&&phase==="init"&&(a===L.graphic_objs_tbl+8||a===L.graphic_objs_tbl+40)){
+    w=+process.env.A8ROOM;}
+  if(a===ROOM&&phase==="init"&&w!==0){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){iter++;for(const [k,d] of (inputs[iter]||[]))key(k,d);
     lines.push(`${iter} ${hbuf().toString(16).padStart(8,"0")} ${h32(SCR0,SCR1).toString(16).padStart(8,"0")}`);}
   return ow(a,w,s);};
