@@ -40,12 +40,12 @@ SCEN = [('покой', 'inputs_idle.txt', 'zx_idle600.bin'),
 
 MUTS = [
     dict(name="render", gate="render_gate",
-         why="окно update_screen на строку ниже (ld l,32 -> 33): чистый ВЫВОД, логика не меняется",
+         why="окно update_screen на строку ниже (приёмник ld l,32 -> 33): чистый ВЫВОД, логика не меняется",
          file="tools/a8_vec.py",
-         old="us_col:\t\t\tld\t\ta, h\n\t\t\t\tsub\t\t0x20\t\t\t\t; буфер -> экран\n"
-             "\t\t\t\tld\t\td, a\n\t\t\t\tld\t\tl, 32\n",
-         new="us_col:\t\t\tld\t\ta, h\n\t\t\t\tsub\t\t0x20\t\t\t\t; буфер -> экран\n"
-             "\t\t\t\tld\t\td, a\n\t\t\t\tld\t\tl, 33\n"),
+         old="us_dst:\t\t\tld\t\th, 0\t\t\t\t; патч: страница экрана\n"
+             "\t\t\t\tld\t\tl, 32\t\t\t\t; HL = приёмник\n",
+         new="us_dst:\t\t\tld\t\th, 0\t\t\t\t; патч: страница экрана\n"
+             "\t\t\t\tld\t\tl, 33\t\t\t\t; HL = приёмник\n"),
     dict(name="logic", gate="lockstep",
          why="update_sprite_loop кладёт в «старую» копию +31 (pixel Y) значение поля +26 (pixel X)",
          file="tools/a8_native_logic.py",
