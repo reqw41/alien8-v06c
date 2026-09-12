@@ -96,6 +96,7 @@ _BODIES = [
     ('list_objects_to_draw', 'N_LIST_OBJS'),
     ('set_both_deadly_flags', 'N_DEADLY'),
     ('calc_pixel_XY', 'N_CALC_PIXEL_XY'),
+    ('do_objs_intersect_on_x', 'N_INTERSECT_X'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -1176,4 +1177,59 @@ lo_step:	inc c
 		ld (z80_ix), hl
 		ret
         ; End of function list_objects_to_draw
+"""
+
+
+# ---------------------------------------------------------------------------
+# do_objs_intersect_on_x — 10.9 % тактов комнаты 48 (75.7 вызова, 1099 тактов на вызов).
+# Четыре обращения (ix+4), (iy+4), (ix+1), (iy+1) — четыре компактных хелпера по 260 тактов.
+#
+# Нативно: два указателя записей (по одному за раз в HL), поля — сдвигом младшего байта.
+# (graphic_objs_tbl & 31) = 8, запись 32-байтная => l ≡ 8 (mod 32), l+4 ≤ 236 — переноса
+# нет (ASSERT).
+#
+# ЧТО ДОЛЖНО ДОЙТИ ДО ВЫЗЫВАЮЩЕГО. Все пять вызывателей (do_any_objs_intersect,
+# adj_dX/dY/dZ_for_obj_intersect, is_on_or_near_obj) читают РОВНО перенос (`jr nc`/`jr c`),
+# держа в B счётчик, в C — dX, в L — dY, в H — dZ, в IX — свой объект, в IY — кандидата.
+# Поэтому B, C, H, L, IX, IY обязаны уцелеть, а последней командой стоит тот же `sub`,
+# что и в оригинале, — флаги совпадают побитно. DE оригинал портит (D = сумма ширин),
+# нативная версия его СОХРАНЯЕТ: опереться на порчу нельзя, а восстановление бесплатно
+# (POP rp на i8080 флагов не трогает, поэтому стоит после `sub`).
+# 1099 тактов на вызов -> 209.
+# ---------------------------------------------------------------------------
+N_INTERSECT_X = """do_objs_intersect_on_x:
+		ASSERT (graphic_objs_tbl & 31) <= 27	; иначе l+4 переносит
+		push hl
+		push de
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 4
+		ld l, a				; -> +4 полуширина по X
+		ld d, (hl)
+		dec l
+		dec l
+		dec l				; -> +1 X
+		ld e, (hl)
+		ld hl, (z80_iy)
+		ld a, l
+		add a, 4
+		ld l, a				; -> +4
+		ld a, d
+		add a, (hl)
+		ld d, a				; D = сумма полуширин
+		dec l
+		dec l
+		dec l				; -> +1
+		ld a, e
+		add a, c			; X своего объекта + dX
+		sub (hl)
+		jp p, doi_x1
+		cpl
+		inc a				; neg
+doi_x1:
+		sub d
+		pop de				; POP rp флагов не трогает — перенос от `sub` цел
+		pop hl
+		ret
+        ; End of function do_objs_intersect_on_x
 """
