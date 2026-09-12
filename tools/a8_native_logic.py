@@ -95,6 +95,7 @@ _BODIES = [
     ('set_draw_objs_overlapped', 'N_SET_DRAW'),
     ('list_objects_to_draw', 'N_LIST_OBJS'),
     ('set_both_deadly_flags', 'N_DEADLY'),
+    ('calc_pixel_XY', 'N_CALC_PIXEL_XY'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -658,6 +659,77 @@ N_DEADLY = """set_both_deadly_flags:
 		pop hl				; POP rp флагов не трогает — Z/S/P от `or` целы
 		ret
         ; End of function set_both_deadly_flags
+"""
+
+
+# ---------------------------------------------------------------------------
+# calc_pixel_XY — 4.1 % тактов итерации (6.9 вызова): изометрия объекта в пиксельные X/Y.
+# Восемь чтений и две записи (ix+d) — транслятор разворачивал каждое в отдельную вставку
+# со своим сохранением A и флагов.
+#
+# Нативно весь проход идёт ОДНИМ указателем HL: сперва +18/+19 (обе поправки — в C и B),
+# затем возврат на +1 и ход по X, Y, Z шагами inc/dec l. Запись в +26/+27 — единственное
+# место, где младший байт может перенести (l ≡ 8 mod 32, 8+26 = 34 > 31), поэтому там
+# явный `jp nc / inc h`; все остальные смещения ≤ +19 в 32-байтную запись укладываются
+# (ASSERT). `srl a` -> `or a` + `rra`, как это делает и транслятор.
+#
+# Оригинал портит ТОЛЬКО A и флаги (BC, DE, HL целы) — BC и HL сохраняются стеком, DE не
+# нужен. Выход: A = пиксельный Y, флаги от `cp 192` (вызыватели читают перенос:
+# loc_D01F делает `call calc_pixel_XY : ret nc`), либо A = byte_5B24 и CY=1 из ранней
+# ветки — оба пути оставлены дословно. POP rp флагов не трогает, поэтому `cp 192` стоит
+# после снятия со стека.
+# 1527 тактов на вызов -> 302.
+# ---------------------------------------------------------------------------
+N_CALC_PIXEL_XY = """calc_pixel_XY:
+		ASSERT (graphic_objs_tbl & 31) <= 12	; иначе l+19 переносит
+        ld a, (byte_5B24)
+        and a
+        scf
+        ret nz
+		push hl
+		push bc
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 18
+		ld l, a				; -> +18
+		ld c, (hl)			; pixel_x_adj
+		inc l
+		ld b, (hl)			; +19 pixel_y_adj
+		ld a, l
+		sub 18
+		ld l, a				; -> +1
+		ld a, (hl)			; X
+		inc l				; -> +2
+		add a, (hl)			; + Y
+		sub 128
+		add a, c			; + pixel_x_adj
+		ld c, a				; пиксельный X
+		ld a, (hl)			; Y
+		dec l				; -> +1
+		sub (hl)			; - X
+		add a, 128
+		or a				; srl a
+		rra
+		inc l
+		inc l				; -> +3
+		add a, (hl)			; + Z
+		sub 40
+		add a, b			; + pixel_y_adj
+		ld b, a				; пиксельный Y
+		ld a, l
+		add a, 23
+		ld l, a				; -> +26 (единственный перенос)
+		jp nc, cpxy_st
+		inc h
+cpxy_st:	ld (hl), c			; +26 пиксельный X
+		inc l
+		ld (hl), b			; +27 пиксельный Y
+		ld a, b
+		pop bc
+		pop hl
+        cp 192   ; bottom line of screen?
+        ret
+        ; End of function calc_pixel_XY
 """
 
 
