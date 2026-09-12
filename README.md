@@ -27,12 +27,14 @@ node tools/lockstep_vec.js build/alien8_8080.r0m build/alien8_8080.sld 600 \
 
 node tools/shot_vec.js build/alien8_vec.r0m 900 spec/keys_start.txt build/shot.pgm
 python3 tools/pgm2png.py build/shot.pgm /tmp/shot.png     # посмотреть картинку
-tools/render_gate.sh HEAD 120                             # гейт картинки vs ревизия
+tools/render_gate.sh HEAD 120 104,39,56,88,48             # гейт картинки vs ревизия (+ по комнатам)
+python3 tools/gatecheck.py                                # САМОПРОВЕРКА: каждый гейт обязан
+                                                          # поймать свою порчу (по коду возврата)
 node tools/profile_vec.js build/alien8_vec.r0m build/alien8_vec.sld 150
 ```
 
 ## Каталоги
-- `tools/` — транслятор, гейты, профилировщики (берутся из knightlore-v06c и правятся под Alien 8)
+- `tools/` — транслятор, гейты, профилировщики (берутся из knightlore-v06c и правятся под Alien 8); `gatecheck.py` вносит в них порчу и проверяет, что гейт её ловит
 - `src/` — asm-исходник игры (сборка дизассемблера tcdev под sjasmplus)
 - `spec/` — спецификации процедур на Python для метода «спец → дамп → asm» (пока пусто)
 - `docs/` — журнал порта
