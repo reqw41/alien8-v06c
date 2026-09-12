@@ -1063,24 +1063,22 @@ wno_win:
 # calc_plyr_dXY. jump_to_upd_object — точка входа для upd_3F.
 # ---------------------------------------------------------------------------
 N_UPD_LOOP = """update_sprite_loop:
+		ld hl, (z80_ix)			; вход ИЗВНЕ: указатель записи только в z80_ix
+usl_body:					; вход из ret_from_tbl_jp: HL уже = запись объекта
 		ld sp, %(sp)s
-		ld hl, ret_from_tbl_jp		; адрес возврата обработчика
-		push hl
-		ld hl, (z80_ix)
+		ld de, ret_from_tbl_jp		; адрес возврата обработчика — через DE, чтобы HL цел
+		push de
+		ld c, (hl)			; graphic_no, пока HL ещё на +0 (обработчик его не трогал)
+		ld de, 24
+		add hl, de			; HL = +24 (ширина, высота, X, Y)
 		ld d, h
 		ld e, l
-		ld a, l
-		add a, 24
-		ld l, a
-		ld a, h
-		adc a, 0
-		ld h, a				; HL = +24 (ширина, высота, X, Y)
 		ld a, e
-		add a, 28
+		add a, 4
 		ld e, a
-		ld a, d
-		adc a, 0
-		ld d, a				; DE = +28 (их «старые» копии)
+		jp nc, usl_d0
+		inc d
+usl_d0:						; DE = +28 (их «старые» копии)
 		ld a, (hl)
 		ld (de), a
 		inc hl
@@ -1095,10 +1093,7 @@ N_UPD_LOOP = """update_sprite_loop:
 		inc de
 		ld a, (hl)
 		ld (de), a
-jump_to_upd_object:
-		ld hl, (z80_ix)
-		ld a, (hl)			; graphic_no -> номер обработчика
-		ld l, a
+		ld l, c				; graphic_no -> номер обработчика (H обнулит jump_to_tbl_entry)
 		ld bc, upd_sprite_jmp_tbl
 jump_to_tbl_entry:
 		ld h, 0
@@ -1127,7 +1122,15 @@ usl_nc:		ld (z80_ix), hl
 		ld a, d
 		sbc a, h			; конец занятой части пройден?
 		jp nc, done_sprite_updates
-		jp update_sprite_loop
+		ex de, hl			; HL = следующая запись — усечённый вход в тело
+		jp usl_body
+        ; ---------------------------------------------------------------------------
+jump_to_upd_object:				; точка входа для upd_3F: указатель только в z80_ix
+		ld hl, (z80_ix)
+		ld a, (hl)			; graphic_no -> номер обработчика
+		ld l, a
+		ld bc, upd_sprite_jmp_tbl
+		jp jump_to_tbl_entry
         ; ---------------------------------------------------------------------------
 """
 
