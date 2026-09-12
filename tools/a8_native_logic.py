@@ -103,6 +103,7 @@ _RANGES = [
     ('calc_display_order_and_render', 'render_list', 'N_DISPLAY_ORDER'),
     ('set_pixel_adj', 'adj_m2_m8', 'N_SET_PIXEL_ADJ'),
     ('upd_02', 'sub_C082', 'N_UPD_02'),
+    ('wipe_next_object', 'loc_CF5F', 'N_WIPE'),
 ]
 
 
@@ -870,6 +871,174 @@ u02_store:	; D = dX, E = dY -> +9/+10, dZ = Z (+3) -> +11. Портит A и HL.
 		inc l
 		ld (hl), a			; +11 dZ = Z
 		ret
+        ; ---------------------------------------------------------------------------
+"""
+
+
+# ---------------------------------------------------------------------------
+# wipe_next_object — 3.0 % тактов итерации: по списку objects_to_draw стирается окно
+# «объединение старого и нового положения объекта». На объект со взведённым битом 5
+# приходилось 16 обращений (ix+d): +7 дважды, затем восьмёрка +24..+31 в разном порядке.
+#
+# Регистров на всё не хватает (оригинал держит запись в IX, а A/B/C/E/H/L заняты счётом),
+# поэтому указатель записи живёт в DE — поля читаются как `ld a,(de)` + `inc e` по 12 тактов
+# вместо 130. Позиционирование на +24 — единственное место с возможным переносом младшего
+# байта (l ≡ 8 mod 32, 8+24 = 32), дальше e ≡ 0 (mod 32) и +24..+31 лежат в одном блоке.
+#
+# Разведение результатов по регистрам: ось X даёт C (min пиксельный X) и H (ширина в
+# колонках), ось Y — B (min пиксельный Y) и L (высота); обе оси считаются одними и теми же
+# временными регистрами, поэтому пара X кладётся на стек и снимается после оси Y
+# (`pop de` + `ld c,e` / `ld h,d`). Стек внутри сбалансирован: ранние выходы — либо ДО
+# push (бит 5 чист), либо ПОСЛЕ pop (левый край >= 192).
+#
+# Прочее:
+#  * `call get_ptr_object` -> `and 0x7F` + `cdo_ptr` (таблица a8_optr): маска нужна,
+#    индексы приходят из objects_to_draw уже с битом «отрисован»;
+#  * `ld (z80_ix), hl` сохранено — IX в этой области видят вызываемые процедуры и
+#    `pop ix` в конце render_dynamic_objects;
+#  * `bit 5,(ix+7)`/`res 5,(ix+7)` -> `and 0x20` / `and 0xDF` по одному указателю;
+#  * `neg` -> `cpl : inc a`; хвост от отсечения по 0xC0 и до fill_window — дословно.
+# ---------------------------------------------------------------------------
+N_WIPE = """wipe_next_object:
+		ASSERT (graphic_objs_tbl & 31) <= 24	; иначе l+7 переносит
+        ld hl, (tmp_objects_to_draw)
+        ld a, (hl)
+        inc hl
+        ld (tmp_objects_to_draw), hl
+        cp 0xFF
+        jp z, loc_CF5F
+		and 0x7F			; индекс приходит с битом «отрисован»
+		call cdo_ptr			; HL = запись объекта (таблица a8_optr)
+		ld (z80_ix), hl			; IX этой области видят и вызываемые, и pop ix в конце
+		ld a, l
+		add a, 7
+		ld l, a				; -> +7
+		ld a, (hl)
+		and 0x20			; bit 5, (ix+7)
+		jp z, wipe_next_object
+		ld a, (hl)
+		and 0xDF			; res 5, (ix+7)
+		ld (hl), a
+		ld a, l
+		add a, 17
+		ld l, a				; -> +24 (единственный перенос)
+		jp nc, wno_p24
+		inc h
+wno_p24:	ex de, hl			; DE = указатель на +24, HL свободен
+        ; ---- ось X: min пиксельного X и максимум правых краёв ----
+		ld a, (de)			; +24 ширина новая
+		ld c, a
+		inc e
+		inc e				; +26
+		ld a, (de)
+		ld b, a				; X новый
+		rrca
+		rrca
+		rrca
+		and 0x1F
+		add a, c
+		ld c, a				; правый край новый
+		inc e
+		inc e				; +28
+		ld a, (de)
+		ld h, a				; ширина старая
+		inc e
+		inc e				; +30
+		ld a, (de)
+		ld l, a				; X старый
+		rrca
+		rrca
+		rrca
+		and 0x1F
+		add a, h
+		ld h, a				; правый край старый
+		ld a, c
+		cp h
+		jp nc, wno_xmax
+		ld c, h
+wno_xmax:	ld a, b				; C = max правых краёв
+		sub l
+		jp c, wno_xmin
+		ld b, l
+wno_xmin:	ld a, b				; B = min(X новый, X старый)
+		rrca
+		rrca
+		rrca
+		and 0x1F
+		ld l, a				; левая колонка
+		ld a, c
+		sub l
+		ld h, a				; ширина в колонках
+		ld c, b				; min пиксельный X
+		push hl
+		push bc				; пара оси X — на стек, регистры нужны оси Y
+        ; ---- ось Y ----
+		ld a, e
+		sub 5
+		ld e, a				; -> +25
+		ld a, (de)			; высота новая
+		ld b, a
+		inc e
+		inc e				; +27
+		ld a, (de)
+		ld c, a				; Y новый
+		add a, b
+		ld b, a				; Y новый + высота новая
+		inc e
+		inc e				; +29
+		ld a, (de)
+		ld h, a				; высота старая
+		inc e
+		inc e				; +31
+		ld a, (de)
+		ld l, a				; Y старый
+		add a, h
+		ld h, a				; Y старый + высота старая
+		ld a, b
+		cp h
+		jp nc, wno_ymax
+		ld b, h
+wno_ymax:	ld a, c				; B = max нижних краёв
+		sub l
+		jp c, wno_ymin
+		ld c, l
+wno_ymin:	ld a, b				; C = min(Y новый, Y старый)
+		sub c
+		ld l, a				; высота окна
+		ld b, c				; min пиксельный Y
+		pop de
+		ld c, e				; C = min пиксельный X
+		pop de
+		ld h, d				; H = ширина в колонках
+        ; ---- отсечение по нижней строке экрана (дословно) ----
+		ld a, b
+        cp 0xC0   ; 'A'
+		jp nc, wipe_next_object
+        add a, l
+        sub 0xC0   ; 'A'
+		jp c, wno_win
+		cpl
+		inc a				; neg
+        add a, l
+        ld l, a
+wno_win:
+        call BC_to_Attr_In_DE
+        call calc_screen_buffer_addr
+        ld a, l
+        ld l, c
+        ld c, a
+        ld a, h
+        ld h, b
+        ld b, a
+        ld a, (objs_wiped_cnt)
+        inc a
+        ld (objs_wiped_cnt), a
+        push bc
+        push de
+        push hl
+        xor a
+        call fill_window
+        jp wipe_next_object
         ; ---------------------------------------------------------------------------
 """
 
