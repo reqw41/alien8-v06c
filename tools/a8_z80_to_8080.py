@@ -1100,7 +1100,7 @@ def a8_seed_oracle(src):
 # сверху вниз по «тактов/итер * доля хелперов». A8_IX_HOT=0 выключает (для сверки).
 A8_VEC_INLINE = {
     'update_sprite_loop', 'calc_display_order_and_render', 'set_draw_objs_overlapped',
-    'list_objects_to_draw', 'set_pixel_adj', 'jump_to_upd_object', 'calc_pixel_XY',
+    'list_objects_to_draw', 'jump_to_upd_object', 'calc_pixel_XY',
     'set_both_deadly_flags', 'upd_02', 'print_sprite', 'wipe_next_object',
     'sub_C099', 'flip_sprite', 'sub_C082', 'upd_10_to_17', 'add_dXYZ',
     'calc_2d_info', 'upd_20_to_2B', 'get_ptr_object',
