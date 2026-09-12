@@ -83,6 +83,12 @@ MUTS = [
              "        src = src.replace('        and a   ; A8: djnz на i8080 портит Z —"
              " пересчитать по накопленному OR\\n', '', 1)\n"
              "    return src\n"),
+    dict(name="flip", gate="flipcheck",
+         why="быстрый путь разворота смотрит только на бит V (`and 0xC0` -> `and 0x80`): "
+             "запрос одного лишь H-разворота проходит мимо",
+         file="tools/a8_native_flip.py",
+         old="        and 0xC0\n        ret z   ; быстрый путь: ориентация уже нужная\n",
+         new="        and 0x80\n        ret z   ; быстрый путь: ориентация уже нужная\n"),
 ]
 
 ENV = {"i8080": {"A8_GATECHECK_I8080": "1"},
@@ -141,6 +147,9 @@ def gate_result(gate, env=None):
         return b.returncode, (b.stdout + b.stderr)[-400:]
     if gate == "render_gate":
         r = run(["tools/render_gate.sh", "HEAD", "40", "104"], env)
+    elif gate == "flipcheck":
+        r = run(["node", "tools/flipcheck_vec.js", "build/alien8_vec.r0m",
+                 "build/alien8_vec.sld"], env)
     elif gate == "nobjcheck":
         r = run(["node", "tools/nobjcheck_vec.js", "build/alien8_vec.r0m",
                  "build/alien8_vec.sld", "60"], env)
