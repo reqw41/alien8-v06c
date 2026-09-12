@@ -9,6 +9,7 @@
 """
 import sys, re, os
 import a8_native_logic
+import a8_native_flip
 sys.path.insert(0, __import__('os').path.dirname(__file__))
 
 
@@ -1323,9 +1324,11 @@ def main():
     pace_desc = None
     if target == 'vec':
         src, pace_desc = a8_pace(src)  # потолок темпа: только цель vec (нужен ISR Вектора)
+    src = a8_native_flip.presub(src)   # ветка flipcache: разворот спрайтов (обе цели)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
     src = a8_native_logic.apply(src)
+    src = a8_native_flip.apply(src)
     helpers = ix_helpers_text()
     if target == 'vec':
         # хелперы — ПОСЛЕ цепочек print_sprite: цепочки обязаны начинаться на границе страницы
