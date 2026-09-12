@@ -97,6 +97,7 @@ _BODIES = [
     ('set_both_deadly_flags', 'N_DEADLY'),
     ('calc_pixel_XY', 'N_CALC_PIXEL_XY'),
     ('do_objs_intersect_on_x', 'N_INTERSECT_X'),
+    ('is_object_not_ignored', 'N_NOT_IGNORED'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -1232,4 +1233,37 @@ doi_x1:
 		pop hl
 		ret
         ; End of function do_objs_intersect_on_x
+"""
+
+
+# ---------------------------------------------------------------------------
+# is_object_not_ignored — 9.0 % тактов комнаты 48 (128.7 вызова, 531 такт на вызов).
+# Два обращения (iy+0) и (iy+7) — два компактных хелпера.
+#
+# Оригинал портит ТОЛЬКО A и флаги, поэтому нативной версии хватает push/pop hl:
+# POP rp на i8080 флагов не трогает, и Z от `and a` (ранний выход) и флаги от `and 2`
+# доходят до вызывающего нетронутыми. A в раннем выходе равен нулю и там, и там.
+#
+# Вызыватели — четыре цикла по таблице (do_any_objs_intersect, adj_dX/dY/dZ_for_obj_intersect):
+# все читают только Z (`jr z`), держа B — счётчик, C/L/H — dX/dY/dZ, IX — свой объект,
+# IY — кандидата. Ни один регистр, кроме A, трогать нельзя — HL и восстанавливается.
+# 531 такт на вызов -> 103 (68 в раннем выходе).
+# ---------------------------------------------------------------------------
+N_NOT_IGNORED = """is_object_not_ignored:
+		ASSERT (graphic_objs_tbl & 31) <= 24	; иначе l+7 переносит
+		push hl
+		ld hl, (z80_iy)
+		ld a, (hl)			; +0 graphic_no
+		and a
+		jp z, ino_ret			; было `ret z` — A = 0, Z = 1
+		ld a, l
+		add a, 7
+		ld l, a				; -> +7 flags7
+		ld a, (hl)
+		cpl
+		and 2
+ino_ret:
+		pop hl				; POP rp флагов не трогает
+		ret
+        ; End of function is_object_not_ignored
 """
