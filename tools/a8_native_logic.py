@@ -98,6 +98,7 @@ _BODIES = [
     ('calc_pixel_XY', 'N_CALC_PIXEL_XY'),
     ('do_objs_intersect_on_x', 'N_INTERSECT_X'),
     ('is_object_not_ignored', 'N_NOT_IGNORED'),
+    ('do_objs_intersect_on_z', 'N_INTERSECT_Z'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -1266,4 +1267,56 @@ ino_ret:
 		pop hl				; POP rp флагов не трогает
 		ret
         ; End of function is_object_not_ignored
+"""
+
+
+# ---------------------------------------------------------------------------
+# do_objs_intersect_on_z — 2.6 % тактов комнаты 48 (23.6 вызова, 843 такта на вызов).
+# Ось Z устроена НЕ так, как X и Y: полуглубина берётся у ОДНОГО из объектов, а у кого
+# именно — решает знак разности (ветка `neg` -> (ix+6), иначе (iy+6)). Обе ветки оставлены
+# дословно; полуглубина своего объекта читается заранее в E, кандидата — только в своей ветке.
+#
+# Сохранность — как у do_objs_intersect_on_x: вызыватели читают РОВНО перенос от
+# последнего `sub d`, значит B, C, H, L, IX, IY обязаны уцелеть; DE оригинал портит, а
+# нативная версия сохраняет (POP rp флагов не трогает и стоит после `sub`).
+# 843 такта на вызов -> 236.
+# ---------------------------------------------------------------------------
+N_INTERSECT_Z = """do_objs_intersect_on_z:
+		ASSERT (graphic_objs_tbl & 31) <= 25	; иначе l+6 переносит
+		push hl
+		push de
+		ld d, h				; D = dZ (параметр приходит в H)
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 3
+		ld l, a				; -> +3 Z
+		ld a, (hl)
+		add a, d			; Z своего объекта + dZ
+		ld d, a
+		inc l
+		inc l
+		inc l				; -> +6 полуглубина своего
+		ld e, (hl)
+		ld hl, (z80_iy)
+		ld a, l
+		add a, 3
+		ld l, a				; -> +3
+		ld a, d
+		sub (hl)
+		jp p, doi_z1
+		cpl
+		inc a				; neg -> глубина СВОЕГО объекта
+		ld d, e
+		jp doi_z2
+doi_z1:
+		inc l
+		inc l
+		inc l				; -> +6 полуглубина кандидата
+		ld d, (hl)
+doi_z2:
+		sub d
+		pop de				; POP rp флагов не трогает
+		pop hl
+		ret
+        ; End of function do_objs_intersect_on_z
 """
