@@ -102,6 +102,7 @@ _BODIES = [
 _RANGES = [
     ('calc_display_order_and_render', 'render_list', 'N_DISPLAY_ORDER'),
     ('set_pixel_adj', 'adj_m2_m8', 'N_SET_PIXEL_ADJ'),
+    ('upd_02', 'sub_C082', 'N_UPD_02'),
 ]
 
 
@@ -730,6 +731,146 @@ cpxy_st:	ld (hl), c			; +26 пиксельный X
         cp 192   ; bottom line of screen?
         ret
         ; End of function calc_pixel_XY
+"""
+
+
+# ---------------------------------------------------------------------------
+# upd_02 (арка, 3.0 % тактов итерации, 4 вызова) — вся цепочка upd_02 .. loc_C080.
+#
+# Тело коротко, но почти целиком состоит из обращений к полям: bit 6,(ix+7); X/Y (+1/+2);
+# dX/dY/dZ (+9/+10/+11); Z (+3); (iy+0), bit 3,(iy+7); в редкой ветке ещё четыре.
+# Нативно — два указателя-прохода по HL и абсолютная адресация там, где IY константа.
+#
+# Что доказано и на что опирается перепись:
+#  * IX здесь — запись graphic_objs_tbl (upd_02 стоит только в таблице обработчиков
+#    upd_sprite_jmp_tbl, куда диспетчер входит с IX = текущая запись), поэтому поля
+#    адресуются младшим байтом: l ≡ 8 (mod 32), максимум l+11 = 243 — переноса нет (ASSERT).
+#  * `ld iy, graphic_objs_tbl` — КОНСТАНТА, и до loc_C050/loc_C069 её никто не меняет
+#    (sub_C099 только читает (iy+1..3); loc_C312 -> get_sprite_dir трогает лишь (ix+7)/(ix+0)
+#    и HL; jump_to_tbl_entry — HL/BC). Значит (iy+d) в хвосте — абсолютные адреса.
+#    Запись `ld (z80_iy), hl` всё равно обязательна: sub_C099 и sub_C082 читают IY оттуда.
+#  * BC не трогается: допуск sub_C099 (0x60F/0xF06/0xF0F) живёт в HL, как в оригинале,
+#    а `push bc`/`pop bc` вокруг диспетчера off_C048 сохранены дословно.
+#  * Чтение X/Y ПЕРЕД set_pixel_adj вместо «после» равнозначно: set_pixel_adj пишет
+#    только +18/+19.
+#  * HL на всех выходах — ровно как в оригинале (0x0F0F на ранних `ret z`).
+#  * `bit n,(iy+7)` -> `and маска` (Z тот же; A и перенос после не читаются),
+#    `neg` -> `cpl : inc a`.
+# 1750 тактов на вызов -> ~460.
+# ---------------------------------------------------------------------------
+N_UPD_02 = """upd_02:
+		ASSERT (graphic_objs_tbl & 31) <= 20	; иначе l+11 переносит
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 7
+		ld l, a				; -> +7
+		ld a, (hl)
+		and 0x40			; bit 6, (ix+7)
+		jp nz, u02_far
+		ld a, l
+		sub 6
+		ld l, a				; -> +1
+		ld d, (hl)			; dX = X
+		inc l				; -> +2
+		ld a, (hl)			; Y
+		add a, 13
+		ld e, a				; dY = Y + 13
+		ld hl, 0xF9FA			; -7,-6
+		call set_pixel_adj
+		call u02_store
+		ld hl, 0x060F
+		call sub_C082
+		jp u02_iy
+u02_far:	ld a, l
+		sub 6
+		ld l, a				; -> +1
+		ld a, (hl)			; X
+		sub 13
+		ld d, a				; dX = X - 13
+		inc l				; -> +2
+		ld e, (hl)			; dY = Y
+		ld hl, 0xFAF6
+		call set_pixel_adj
+		call u02_store
+		ld hl, 0x0F06
+		call sub_C082
+u02_iy:		ld hl, graphic_objs_tbl		; IY = игрок
+		ld (z80_iy), hl
+		ld hl, 0x0F0F			; допуск sub_C099 (как в оригинале — до проверок)
+		ld a, (graphic_objs_tbl)	; (iy+0) player graphic no
+		or a
+		ret z
+		ld a, (graphic_objs_tbl+7)
+		and 8				; bit 3, (iy+7)
+		ret z
+		call sub_C099
+		ret nc
+		push bc
+		ld bc, off_C048
+		jp loc_C312
+        ; ---------------------------------------------------------------------------
+off_C048:
+        DW loc_C050
+        DW loc_C050
+        DW loc_C069
+        DW loc_C069
+        ; ---------------------------------------------------------------------------
+loc_C050:	ld a, (graphic_objs_tbl+7)
+		and 0x40			; bit 6, (iy+7)
+		jp nz, loc_C080
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 10
+		ld l, a
+		ld a, (hl)			; (ix+10) dY
+		ld hl, graphic_objs_tbl+2
+		cp (hl)				; (iy+2)
+		jp z, loc_C080
+		ld a, 1
+		jp nc, u02_s15
+		cpl
+		inc a				; neg
+u02_s15:	ld (graphic_objs_tbl+15), a
+		jp loc_C080
+        ; ---------------------------------------------------------------------------
+loc_C069:	ld a, (graphic_objs_tbl+7)
+		and 0x40			; bit 6, (iy+7)
+		jp z, loc_C080
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 9
+		ld l, a
+		ld a, (hl)			; (ix+9) dX
+		ld hl, graphic_objs_tbl+1
+		cp (hl)				; (iy+1)
+		jp z, loc_C080
+		ld a, 1
+		jp nc, u02_s14
+		cpl
+		inc a				; neg
+u02_s14:	ld (graphic_objs_tbl+14), a
+loc_C080:	pop bc
+		ret
+        ; ---------------------------------------------------------------------------
+u02_store:	; D = dX, E = dY -> +9/+10, dZ = Z (+3) -> +11. Портит A и HL.
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 3
+		ld l, a				; -> +3
+		ld a, (hl)			; Z
+		inc l
+		inc l
+		inc l
+		inc l
+		inc l
+		inc l				; -> +9
+		ld (hl), d
+		inc l
+		ld (hl), e			; +10
+		inc l
+		ld (hl), a			; +11 dZ = Z
+		ret
+        ; ---------------------------------------------------------------------------
 """
 
 
