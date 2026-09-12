@@ -68,10 +68,16 @@ let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");
 const startIter=iter;
 let ilTot=0,ilCalls=0,cur=-1,frc=0,tacc=0,lost=0,frames=0,hcyc_halt=0;
+// Цена ограничителя темпа (vec_pace) отдельной строкой: код и halt порознь. Границы —
+// от vec_pace до ближайшей метки за ним, не считая его внутренних (vp_*).
+const PC0=L.vec_pace===undefined?-1:L.vec_pace;
+const PCE=PC0<0?-1:Math.min(...Object.entries(L).filter(([n,a])=>a>PC0&&!/^vp_/.test(n)).map(([n,a])=>a));
+let pcCode=0,pcHalt=0;
 while(iter-startIter<N&&steps<3e8){
   if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();}
   const pc=cpu.pc;const c=(cpu.instruction(),cpu.vcycles);steps++;total+=c;TOT+=c;frc+=c;
   if(cpu.last_opcode===0x76)hcyc_halt+=c;
+  if(PC0>=0&&pc>=PC0&&pc<PCE){if(cpu.last_opcode===0x76)pcHalt+=c;else pcCode+=c;}
   tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
   if(cpu.last_opcode===0xd3)io.commit();
   let i=idx(pc);if(i>=0){if(isHelper[i]){ilTot+=c;if(pc===fa[i])ilCalls++;if(cur>=0){cyc[cur]+=c;hcyc[cur]+=c;}}else{cur=i;cyc[i]+=c;if(pc===fa[i])calls[i]++;}}}
@@ -79,6 +85,26 @@ const iters=iter-startIter;
 console.log(`IX/IY-хелперы: ${(ilTot/iters).toFixed(0)} тактов/итер (${(100*ilTot/total).toFixed(1)} % всех тактов), вызовов ${(ilCalls/iters).toFixed(1)}/итер, ${(ilTot/Math.max(1,ilCalls)).toFixed(1)} такта на обращение`);
 console.log(`итераций ${iters}, инструкций ${steps}, тактов ${total}, тактов/итерацию ${(total/iters).toFixed(0)} (${(3000000/(total/iters)).toFixed(1)} итер/с на 3 МГц)`);
 console.log(`кадров ${frames}, обратный ход пришёлся на di: ${lost} (${(100*lost/frames).toFixed(1)} %); в halt ${(hcyc_halt/iters).toFixed(0)} тактов/итер (${(100*hcyc_halt/total).toFixed(1)} %)`);
+if(PC0>=0)console.log(`ограничитель темпа: ${(pcCode/iters).toFixed(0)} тактов/итер кода + ${(pcHalt/iters).toFixed(0)} тактов/итер halt (${(100*(pcCode+pcHalt)/total).toFixed(1)} % всего)`);
+// Разброс длительности итерации в кадрах — метрика СГЛАЖЕННОСТИ темпа (§19 рецепта KL).
+// Первая итерация окна — вход в комнату (десятки кадров), она исключается: иначе среднее и СКО врут.
+// ЛОВУШКА: «не равны медиане» сама по себе не говорит ничего. У ограничителя эта доля равна доле
+// «длинных» шагов Брезенхэма и узор РЕГУЛЯРНЫЙ; без него доля меньше, но разброс случайный.
+// Смотреть надо на пару «мин/макс» и на узор.
+{ const d=[];for(let i=1;i<iterFr.length;i++)d.push(iterFr[i]-iterFr[i-1]);
+  const dc=[];for(let i=1;i<iterCy.length;i++)dc.push((iterCy[i]-iterCy[i-1])/59904);
+  const w=d.slice(-N),wc=dc.slice(-N);
+  if(w.length>1){ const t=w.slice(1),tc=wc.slice(1);
+    const sr=[...t].sort((a,b)=>a-b),med=sr[sr.length>>1];
+    const off=t.filter(x=>x!==med).length;
+    const mean=t.reduce((a,b)=>a+b,0)/t.length,meanc=tc.reduce((a,b)=>a+b,0)/tc.length;
+    const sd=Math.sqrt(tc.reduce((a,b)=>a+(b-meanc)*(b-meanc),0)/tc.length);
+    const h={};for(const x of t)h[x]=(h[x]||0)+1;
+    const FPS=3000000/59904;
+    console.log(`длительность итерации без входа в комнату (${t.length} итер), кадров: среднее ${mean.toFixed(3)} (= ${(FPS/mean).toFixed(2)} итер/с) мин ${Math.min(...t)} макс ${Math.max(...t)} медиана ${med}, не равны медиане ${(100*off/t.length).toFixed(1)} %`);
+    console.log(`  по тактам (в кадрах): среднее ${meanc.toFixed(3)} мин ${Math.min(...tc).toFixed(3)} макс ${Math.max(...tc).toFixed(3)} СКО ${sd.toFixed(3)}`);
+    console.log(`  гистограмма кадров: ${Object.keys(h).map(Number).sort((a,b)=>a-b).map(k=>k+":"+h[k]).join(" ")}`);
+    console.log(`  узор (первые 60): ${t.slice(0,60).map(x=>x<10?x:"+").join("")}`); } }
 const rows_=[];for(let i=0;i<fa.length;i++)if(cyc[i]>0)rows_.push([fnm[i],cyc[i],(i+1<fa.length?fa[i+1]:0x10000)-fa[i],calls[i],hcyc[i]]);
 rows_.sort((a,b)=>b[1]-a[1]);
 console.log("процедура                          тактов%   тактов/итер  байт  вызовов/итер  из них IX-хелперы%");
