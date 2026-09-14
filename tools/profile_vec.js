@@ -11,7 +11,7 @@ const LAG=+(process.env.A8_LAG||1);
 const IRQDROP=!!process.env.A8_IRQDROP;
 const L={};
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L))L[n]=+p[5];}}
-const fn=Object.entries(L).filter(([n,a])=>!/^(loc_|\.|IL_|rk_|a8_vb_|rp_|vb_|ps_|fw_|bts_|us_|vdb_|vp_|sd_|usl_|cdo_|lo_|ov_|d_3467|u02_|u2d_|ady_|adz_|wno_|cpxy_|doi_|ino_|ae3_|fl_v|fl_h|fl_r|fl_n|fl_w|fl_c)/.test(n)&&a>=0x80).sort((x,y)=>x[1]-y[1]);
+const fn=Object.entries(L).filter(([n,a])=>!/^(loc_|\.|IL_|rk_|a8_vb_|rp_|vb_|ps_|fw_|bts_|us_|vdb_|vp_|sd_|usl_|cdo_|lo_|ov_|d_3467|u02_|u2d_|ady_|adz_|wno_|cpxy_|doi_|ino_|ae3_|fl_v|fl_h|fl_r|fl_n|fl_w|fl_c|mst_|msr_|mse|mc_|mf_|mvm_|msi_|mpt_|mt_|aml_|pa_l|pauk_)/.test(n)&&a>=0x80).sort((x,y)=>x[1]-y[1]);
 const isHelper=fn.map(x=>/^il_/.test(x[0]));
 const fa=fn.map(x=>x[1]), fnm=fn.map(x=>x[0]);
 function idx(pc){let lo=0,hi=fa.length-1,r=-1;while(lo<=hi){const m=(lo+hi)>>1;if(fa[m]<=pc){r=m;lo=m+1;}else hi=m-1;}return r;}
