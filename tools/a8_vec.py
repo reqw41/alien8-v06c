@@ -253,37 +253,62 @@ vp_done:		ld		(hl), 0				; отсчёт с этого кадра (сразу п�
 ; Ширину берём из уже записанного патча отката столбца (loc_D10F+1 = w-1), высоту — из a8_lines,
 ; путь — из a8_shpg (0 = выровненный). Сохраняет ВСЕ регистры: в A8 к моменту вызова в H лежит
 ; страница таблицы сдвига, в BC — адрес в буфере, в DE — указатель на данные спрайта.
+; Оценка цепочки = h*(26w+42) (выровненный) и h*(62w-18) (сдвинутый) — ровно модель строки,
+; такт в такт, запас сверху даёт только добавка +512 тактов на обвязку блока.
+; Считаем по рецепту Knight Lore (vec_ps_budget): кратные h берём СДВИГАМИ (add hl,hl), а
+; цикл остаётся один и короткий — по ширине, w-1 ≤ 7 итераций. Прежняя запись гоняла два
+; цикла: w итераций по строке И h итераций по высоте (h ≈ 22 в стартовой) — 2.5 % такта.
+;   выровненный: старт (w=1) 68h = 2*26h + 16h, шаг 26h = 16h+8h+2h
+;   сдвинутый:   старт (w=1) 44h = 32h+8h+2h+2h, шаг 62h = 64h-2h
 a8_ps_budget:	push	hl
 				push	de
 				push	bc
 				push	af
-				ld		a, (a8_shpg)
-				or		a
-				ld		de, 42				; выровненный: строка = 42 + 26w
-				ld		hl, 26
-				jp		z, apb_w0
-				ld		de, 0xFFEE			; сдвинутый: строка = -18 + 62w
-				ld		hl, 62
-apb_w0:			ld		a, (loc_D10F+1)		; w-1
-				inc		a
-				ld		b, a
-apb_w:			ld		a, e
-				add		a, l
-				ld		e, a
-				ld		a, d
-				adc		a, h
-				ld		d, a
-				dec		b
-				jp		nz, apb_w
-				ld		b, d				; BC = тиков на строку
-				ld		c, e
-				ld		hl, 0
 				ld		a, (a8_lines)
+				ld		h, 0
+				ld		l, a				; HL = h
+				add		hl, hl				; 2h
+				ld		b, h
+				ld		c, l				; BC = 2h
+				add		hl, hl				; 4h
+				add		hl, hl				; 8h
+				ld		d, h
+				ld		e, l				; DE = 8h
+				add		hl, hl				; 16h
+				ld		a, (a8_shpg)		; 0 = выровненный путь
 				or		a
+				jp		nz, apb_sh
+				push	hl					; 16h
+				add		hl, de				; 24h
+				add		hl, bc				; 26h = шаг
+				ld		d, h
+				ld		e, l
+				add		hl, hl				; 52h
+				pop		bc					; 16h
+				add		hl, bc				; 68h = старт
+				jp		apb_go
+apb_sh:			push	hl					; 16h
+				add		hl, hl				; 32h
+				add		hl, de				; 40h
+				add		hl, bc				; 42h
+				add		hl, bc				; 44h = старт
+				ex		de, hl				; DE = старт
+				pop		hl					; 16h
+				add		hl, hl				; 32h
+				add		hl, hl				; 64h
+				ld		a, l				; 62h = 64h - 2h
+				sub		c
+				ld		l, a
+				ld		a, h
+				sbc		a, b
+				ld		h, a				; HL = шаг
+				ex		de, hl				; HL = старт, DE = шаг
+apb_go:			ld		a, (loc_D10F+1)		; w-1
+apb_m:			or		a
 				jp		z, apb_done
-apb_h:			add		hl, bc
 				dec		a
-				jp		nz, apb_h
+				add		hl, de
+				jp		apb_m
 apb_done:		ld		a, h
 				add		a, 2				; +512 тиков: заголовок блока, возврат SP, ei
 				ld		d, a
