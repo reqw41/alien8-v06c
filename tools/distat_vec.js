@@ -12,6 +12,7 @@ const fs=require("fs"),vm=require("vm");
 const base="/Users/boris/projects/vector06js";
 const [ROM,SLD,NS,ROOMS,INPUTS]=process.argv.slice(2); const N=+NS||200;
 const LAG=+(process.env.A8_LAG||1);
+const IRQDROP=!!process.env.A8_IRQDROP;
 const L={},lab=[];
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L)){L[n]=+p[5];lab.push([+p[5],n]);}}}
 lab.sort((a,b)=>a[0]-b[0]);
@@ -67,7 +68,9 @@ function runRoom(room){
   if(phase!=="game")return null;
   const start=iter; let curEst=0,frc=0,steps=0,tacc=0,tot=0,diAt=-1,diT=0,frames=0,lost=0,lostAt=new Map(),pendEst=0,pendHalt=0;
   while(iter-start<N&&steps<2e8){
-    if(frc>=59904){frc-=59904;frames++;if(!cpu.iff){lost++;if(diAt>=0)lostAt.set(diAt,(lostAt.get(diAt)||0)+1);}v06c.irq=true;v06c.checkInterrupt();}
+    if(frc>=59904){frc-=59904;frames++;if(!cpu.iff){lost++;if(diAt>=0)lostAt.set(diAt,(lostAt.get(diAt)||0)+1);}
+      // A8_IRQDROP=1 — модель железа: прерывание не защёлкивается, кадр под di теряется насовсем.
+      if(!(IRQDROP&&!cpu.iff)){v06c.irq=true;v06c.checkInterrupt();}}
     const pc=cpu.pc, op=rd(pc);
     if(pc===VDB){pendEst=(cpu.regs[2]<<8)|cpu.regs[3];}                  // оценка блока в тиках ВИ53 (DE)
     if(op===0xF3&&cpu.iff){diAt=pc;diT=tot;

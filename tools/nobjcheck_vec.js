@@ -70,7 +70,9 @@ for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
 let guard=0; while(phase!=="game"&&guard++<4000)v06c.oneInterrupt(true);
 if(phase!=="game"){console.log("не дошли до комнаты");process.exit(2);}
 const startIter=iter; let frc=0,tacc=0;
-while(iter-startIter<N&&steps<3e8){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
+// A8_IRQDROP=1 — модель железа: прерывание Вектора не защёлкивается, обратный ход под di теряется.
+const IRQDROP=!!process.env.A8_IRQDROP;
+while(iter-startIter<N&&steps<3e8){if(frc>=59904){frc-=59904;if(!(IRQDROP&&!cpu.iff)){v06c.irq=true;v06c.checkInterrupt();}}
   const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
   if(cpu.last_opcode===0xd3)io.commit();}
 console.log(`итераций ${iter-startIter}, последний живой слот: максимум ${maxlive}, среднее занятых ${(sumlive/Math.max(1,cntlive)).toFixed(1)} из ${NOBJ}`

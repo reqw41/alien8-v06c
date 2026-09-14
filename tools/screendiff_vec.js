@@ -88,7 +88,9 @@ let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");
 const startIter=iter; let steps=0,frc=0,tacc=0;   // tacc: ВИ53 тикает вдвое медленнее CPU (1.5 МГц) — иначе секундомер бюджета стоит
 
-while(iter-startIter<N&&steps<3e8){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
+// A8_IRQDROP=1 — модель железа: прерывание Вектора не защёлкивается, обратный ход под di теряется.
+const IRQDROP=!!process.env.A8_IRQDROP;
+while(iter-startIter<N&&steps<3e8){if(frc>=59904){frc-=59904;if(!(IRQDROP&&!cpu.iff)){v06c.irq=true;v06c.checkInterrupt();}}
   const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();}
 fs.writeFileSync(`build/scr_${TAG}.txt`,lines.join("\n")+"\n");
 const dump=Buffer.alloc(SCR1-SCR0+32*192);let di=0;

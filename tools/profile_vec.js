@@ -8,6 +8,7 @@ const fs=require("fs"),vm=require("vm");
 const base="/Users/boris/projects/vector06js";
 const [ROM,SLD,NS,INPUTS]=process.argv.slice(2); const N=+NS||300;
 const LAG=+(process.env.A8_LAG||1);
+const IRQDROP=!!process.env.A8_IRQDROP;
 const L={};
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L))L[n]=+p[5];}}
 const fn=Object.entries(L).filter(([n,a])=>!/^(loc_|\.|IL_|rk_|a8_vb_|rp_|vb_|ps_|fw_|bts_|us_|vdb_|vp_|sd_|usl_|cdo_|lo_|ov_|d_3467|u02_|wno_|cpxy_|fl_v|fl_h|fl_r|fl_n|fl_w|fl_c)/.test(n)&&a>=0x80).sort((x,y)=>x[1]-y[1]);
@@ -73,9 +74,20 @@ let ilTot=0,ilCalls=0,cur=-1,frc=0,tacc=0,lost=0,frames=0,hcyc_halt=0;
 const PC0=L.vec_pace===undefined?-1:L.vec_pace;
 const PCE=PC0<0?-1:Math.min(...Object.entries(L).filter(([n,a])=>a>PC0&&!/^vp_/.test(n)).map(([n,a])=>a));
 let pcCode=0,pcHalt=0;
+// Тело ISR: скан клавиатуры (vec_scan) зовут и настоящее прерывание (vec_isr), и догон (vec_cu).
+// Число тел за прогон обязано равняться числу кадров — иначе ограничитель темпа и ввод отстают.
+const VSCAN=L.vec_scan,VISR=L.vec_isr;
+let scans=0,isrs=0,lastScanFr=0,maxScanGap=0;
 while(iter-startIter<N&&steps<3e8){
-  if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();}
-  const pc=cpu.pc;const c=(cpu.instruction(),cpu.vcycles);steps++;total+=c;TOT+=c;frc+=c;
+  if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;
+    // A8_IRQDROP=1: МОДЕЛЬ ЖЕЛЕЗА. Кадровое прерывание Вектора НЕ защёлкивается: если обратный
+    // ход пришёлся на di, кадр потерян НАСОВСЕМ. Без этого флага запрос ставится всегда (как
+    // держит его vector06js) и любой замер «сколько стоит потеря кадра» вакуумный.
+    if(!(IRQDROP&&!cpu.iff)){v06c.irq=true;v06c.checkInterrupt();}}
+  const pc=cpu.pc;
+  if(pc===VSCAN){scans++;const gp=FR-lastScanFr;if(gp>maxScanGap)maxScanGap=gp;lastScanFr=FR;}
+  if(pc===VISR)isrs++;
+  const c=(cpu.instruction(),cpu.vcycles);steps++;total+=c;TOT+=c;frc+=c;
   if(cpu.last_opcode===0x76)hcyc_halt+=c;
   if(PC0>=0&&pc>=PC0&&pc<PCE){if(cpu.last_opcode===0x76)pcHalt+=c;else pcCode+=c;}
   tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
@@ -84,7 +96,8 @@ while(iter-startIter<N&&steps<3e8){
 const iters=iter-startIter;
 console.log(`IX/IY-хелперы: ${(ilTot/iters).toFixed(0)} тактов/итер (${(100*ilTot/total).toFixed(1)} % всех тактов), вызовов ${(ilCalls/iters).toFixed(1)}/итер, ${(ilTot/Math.max(1,ilCalls)).toFixed(1)} такта на обращение`);
 console.log(`итераций ${iters}, инструкций ${steps}, тактов ${total}, тактов/итерацию ${(total/iters).toFixed(0)} (${(3000000/(total/iters)).toFixed(1)} итер/с на 3 МГц)`);
-console.log(`кадров ${frames}, обратный ход пришёлся на di: ${lost} (${(100*lost/frames).toFixed(1)} %); в halt ${(hcyc_halt/iters).toFixed(0)} тактов/итер (${(100*hcyc_halt/total).toFixed(1)} %)`);
+console.log(`кадров ${frames}, обратный ход пришёлся на di: ${lost} (${(100*lost/frames).toFixed(1)} %${IRQDROP?", A8_IRQDROP=1: эти кадры ПОТЕРЯНЫ":""}); в halt ${(hcyc_halt/iters).toFixed(0)} тактов/итер (${(100*hcyc_halt/total).toFixed(1)} %)`);
+console.log(`тело ISR: ${scans} (настоящих ISR ${isrs}, догонов ${scans-isrs}) при ${frames} кадрах — недостача ${frames-scans}; макс. интервал между сканами клавиатуры ${maxScanGap} кадров`);
 if(PC0>=0)console.log(`ограничитель темпа: ${(pcCode/iters).toFixed(0)} тактов/итер кода + ${(pcHalt/iters).toFixed(0)} тактов/итер halt (${(100*(pcCode+pcHalt)/total).toFixed(1)} % всего)`);
 // Разброс длительности итерации в кадрах — метрика СГЛАЖЕННОСТИ темпа (§19 рецепта KL).
 // Первая итерация окна — вход в комнату (десятки кадров), она исключается: иначе среднее и СКО врут.
