@@ -1088,7 +1088,7 @@ a8_in_scan:
 a8_in_1:
         ld a, (de)             ; младший байт ряда (0 = конец)
         and a
-        jr z, a8_in_store
+        jr z, a8_in_joy
         ld l, a
         inc de
         ld a, (de)             ; маска клавиш ряда
@@ -1100,11 +1100,64 @@ a8_in_1:
         or c
         ld c, a
         jr a8_in_1
+a8_in_joy:   ; ДЖОЙСТИК РАБОТАЕТ ВСЕГДА, ПАРАЛЛЕЛЬНО С КЛАВИАТУРОЙ (биты просто складываются с
+        ; набранными, ничего не отменяется) и сводится ровно к тем же битам user_input, что клавиши
+        ; ВЫБРАННОЙ раскладки. Состояние кладёт в vec_joyraw кадровый ISR (vec_joy).
+        ; Таблица: маска джойстика (active-high), биты user_input; 0 = конец.
+        ; Сюда НЕ заходят по раннему выходу «конец игры» (там jp a8_in_store с C = 0) — и правильно:
+        ; после конца игры ввода нет ни с клавиатуры, ни со стика.
+        ld hl, a8_joy_r        ; раскладки 1 и 2 — поворотные
+        ld a, (user_input_method)
+        and 8                  ; 3 DIRECTIONAL CONTROL
+        jr z, a8_joy_go
+        ld hl, a8_joy_d
+a8_joy_go:
+        ; ЗАМОК КНОПОК: игру запустили, не отпустив FIRE, — первый же кадр игры прочёл бы её как
+        ; прыжок. a8_menu_exit пишет в vec_joylck 0xC0 (обе кнопки), здесь замок держится, пока
+        ; кнопку не отпустят, и открывается сам (lck &= raw).
+        ld a, (vec_joylck)
+        ld b, a
+        ld a, (vec_joyraw)
+        and b
+        ld (vec_joylck), a
+        cpl
+        ld b, a
+        ld a, (vec_joyraw)
+        and b
+        ld b, a                ; B = действующее состояние джойстика
+        jr z, a8_in_store
+a8_joy_1:
+        ld a, (hl)             ; маска джойстика (0 = конец таблицы)
+        inc hl
+        and a
+        jr z, a8_in_store
+        and b
+        ld a, (hl)             ; биты user_input; ld a,(hl) и inc hl флагов не трогают,
+        inc hl                 ; поэтому Z здесь ещё от `and b`
+        jr z, a8_joy_1
+        or c
+        ld c, a
+        jr a8_joy_1
 a8_in_store:
         ld a, c
         ld (user_input), a
         ret
         ; End of function check_user_input
+a8_joy_r:   ; 1 KEYBOARD и 2 CURSOR (поворотные): «вниз» не заведено — его нет и у клавиатуры
+        DB 0x02, 0x01   ; LEFT  -> поворот влево  (как Z / стрелка влево)
+        DB 0x01, 0x02   ; RIGHT -> поворот вправо (как X / стрелка вправо)
+        DB 0x04, 0x04   ; UP    -> шаг вперёд     (как A / стрелка вверх)
+        DB 0x40, 0x08   ; FIRE1 -> прыжок         (как Q / пробел)
+        DB 0x80, 0x10   ; FIRE2 -> взять/бросить  (как цифры / стрелка вниз)
+        DB 0
+a8_joy_d:   ; 3 DIRECTIONAL CONTROL: стик = стороны света, «взять» на бите 5
+        DB 0x02, 0x01   ; LEFT  -> влево          (как стрелка влево)
+        DB 0x01, 0x02   ; RIGHT -> вправо         (как стрелка вправо)
+        DB 0x04, 0x04   ; UP    -> вверх          (как стрелка вверх)
+        DB 0x08, 0x10   ; DOWN  -> вниз           (как стрелка вниз)
+        DB 0x40, 0x08   ; FIRE1 -> прыжок         (как пробел)
+        DB 0x80, 0x20   ; FIRE2 -> взять/бросить  (как цифры 0..7)
+        DB 0
 a8_in_t1:   ; 1 KEYBOARD — КЛАВИШИ ОРИГИНАЛА Alien 8 (расшифровка `keyboard:` листинга tcdev):
             ; Z C M B влево, X V N SYM вправо, A..G H..L вперёд, Q..T P..Y прыжок, цифры взять.
             ; ZX ENTER (тоже «вперёд») на Вектор не перенесён: ВК отдана ПАУЗЕ, см. audio_CE22.
