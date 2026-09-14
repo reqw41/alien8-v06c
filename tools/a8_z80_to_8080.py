@@ -1330,7 +1330,7 @@ def a8_pace(src):
     env = os.environ.get('A8PACE', '28.5').strip().lower()
     if env in ('off', 'no', 'none', '0', ''):
         src, n = _PACE_BLOCK.subn('', src)
-        assert n == 3, 'блоков ограничителя темпа должно быть три, найдено %d' % n
+        assert n == 4, 'блоков ограничителя темпа должно быть четыре, найдено %d' % n
         return src, 'выключен (A8PACE=off)'
     rate = float(env)
     FPS = 3000000.0 / 59904.0          # кадр Вектора = 59904 такта на 3 МГц -> 50.08 Гц
@@ -1350,6 +1350,62 @@ def a8_pace(src):
     src = src.replace(old, old + "        call vec_pace   ; A8: потолок темпа (вариант А)\n", 1)
     eff = FPS / (pint + pfrc / 256.0)
     return src, '%d+%d/256 кадра = %.2f итер/с' % (pint, pfrc, eff)
+
+
+_DIB_BLOCK = re.compile(r'(?m)^;__DIB_BEG__\n.*?^;__DIB_END__\n', re.S)
+_CU_BLOCK = re.compile(r'(?m)^;__CU_BEG__\n.*?^;__CU_END__\n', re.S)
+_EI_BLOCK = re.compile(r'(?m)^;__EI_BEG__\n.*?^;__EI_END__\n', re.S)
+_DIB_N, _CU_N, _EI_N = 10, 5, 4
+
+
+def _unmark(rx, src, n_want, name):
+    """Снять маркеры, оставив тело блока."""
+    src, n = rx.subn(lambda m: m.group(0).split('\n', 1)[1].rsplit('\n', 2)[0] + '\n', src)
+    assert n == n_want, 'блоков %s должно быть %d, найдено %d' % (name, n_want, n)
+    return src
+
+
+def _drop(rx, src, n_want, name):
+    src, n = rx.subn('', src)
+    assert n == n_want, 'блоков %s должно быть %d, найдено %d' % (name, n_want, n)
+    return src
+
+
+def a8_dibudget(src):
+    """Цена отказа бюджета di (цель `vec`): что делать, когда блок не помещается до конца кадра.
+
+    Кадровое прерывание Вектора НЕ защёлкивается, поэтому обратный ход, пришедшийся на di,
+    теряется насовсем (см. §12 рецепта KL и reference_vector06c_interrupt_not_latched).
+
+    A8_DIBUDGET=on   — прежний бюджет: перед каждым di-блоком `vec_di_budget` читает секундомер
+                       ВИ53 и при нехватке остатка кадра уходит в `ei/halt`. ЦЕЛЫЙ кадр за
+                       каждый отказ, фаза кадра залипает (журнал, заход 4.4).
+    A8_DIBUDGET=off  — (по умолчанию) бюджета нет, блок идёт сразу; конец блока зовёт `vec_cu`,
+                       который по секундомеру замечает потерянный кадр и выполняет тело ISR
+                       руками (скан клавиатуры, ряды ZX, pace_el, перезарядка секундомера).
+    A8_DIBUDGET=raw  — НЕГАТИВНЫЙ КОНТРОЛЬ для замера: ни бюджета, ни догона. Кадры реально
+                       теряются, `pace_el` и скан клавиатуры отстают. В игру не годится.
+
+    Блоки помечены в tools/a8_vec.py: __DIB__ — машинерия бюджета, __CU__ — догон,
+    __EI__ — голый `ei` в хвосте di-блока (он нужен и `on`, и `raw`).
+    Возвращает (src, описание).
+    """
+    env = os.environ.get('A8_DIBUDGET', 'off').strip().lower()
+    if env in ('on', '1', 'yes', 'true'):
+        src = _unmark(_DIB_BLOCK, src, _DIB_N, 'бюджета di')
+        src = _drop(_CU_BLOCK, src, _CU_N, 'догона')
+        src = _unmark(_EI_BLOCK, src, _EI_N, 'ei хвоста')
+        return src, 'бюджет di + ei/halt (A8_DIBUDGET=on)'
+    if env == 'raw':
+        src = _drop(_DIB_BLOCK, src, _DIB_N, 'бюджета di')
+        src = _drop(_CU_BLOCK, src, _CU_N, 'догона')
+        src = _unmark(_EI_BLOCK, src, _EI_N, 'ei хвоста')
+        return src, 'НЕТ НИЧЕГО: кадры теряются (A8_DIBUDGET=raw, только для замера)'
+    assert env in ('off', '0', 'no', 'none', ''), 'A8_DIBUDGET: on|off|raw, дано %r' % env
+    src = _drop(_DIB_BLOCK, src, _DIB_N, 'бюджета di')
+    src = _unmark(_CU_BLOCK, src, _CU_N, 'догона')
+    src = _drop(_EI_BLOCK, src, _EI_N, 'ei хвоста')
+    return src, 'догоняющий ISR, ожидания нет (A8_DIBUDGET=off)'
 
 
 def a8_logic_fixes(src):
@@ -1607,8 +1663,10 @@ def main():
     src = a8_no_delay(src)             # обе цели: состояние не меняется, локстеп это судит
     src = a8_glue(src, target)
     pace_desc = None
+    dib_desc = None
     if target == 'vec':
         src, pace_desc = a8_pace(src)  # потолок темпа: только цель vec (нужен ISR Вектора)
+        src, dib_desc = a8_dibudget(src)   # цена отказа бюджета di: ожидание или догоняющий ISR
     src = a8_native_flip.presub(src)   # ветка flipcache: разворот спрайтов (обе цели)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
@@ -1625,7 +1683,8 @@ def main():
         assert n == 1, 'место для IX-хелперов'
     open(outp, 'w', encoding='utf-8').write(src)
     print(f'{inp} -> {outp} (цель {target}); IX-хелперов {len(_ix_used)}; exx-пар {exx_pairs}'
-          + (f'; ограничитель темпа: {pace_desc}' if pace_desc else ''))
+          + (f'; ограничитель темпа: {pace_desc}' if pace_desc else '')
+          + (f'; di-блоки: {dib_desc}' if dib_desc else ''))
 
 
 if __name__ == '__main__':
