@@ -114,6 +114,7 @@ _BODIES = [
     ('do_objs_intersect_on_z', 'N_INTERSECT_Z'),
     ('do_objs_intersect_on_y', 'N_INTERSECT_Y'),
     ('sub_AE03', 'N_SUB_AE03'),
+    ('adj_dY_for_obj_intersect', 'N_ADJ_DY'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -1475,4 +1476,117 @@ u2d_ret:
 		pop hl
 		ret
         ; ---------------------------------------------------------------------------
+"""
+
+
+# ---------------------------------------------------------------------------
+# adj_dY_for_obj_intersect — 2.1 % тактов комнаты 48 (1.9 вызова × 31 запись) плюс
+# бо́льшая часть 1.7 % процедуры is_object_not_ignored, которую этот цикл и зовёт.
+#
+# Переписан ТОЛЬКО СКЕЛЕТ цикла, «попадание» (set 1,(ix+12), перенос битов 6 между
+# (ix+13)/(iy+13), (iy+10) и adj_d_for_out_of_bounds) оставлено дословно тем же кодом,
+# что ставил транслятор: оно срабатывает редко (весь цикл — 213 тактов на запись, то есть
+# почти целиком холостые проходы), а любой компактный хелпер il_* сохраняет DE и BC —
+# проверено по телам il_ix_set/lda/or/sta и il_iy_or/sta/bit: там живут только HL, A и
+# статические ячейки il_tmp/il_tmp2/il_a/il_f.
+#
+# Что изменилось:
+#   * указатель кандидата живёт в DE (`ld a,(de)`), а не в памяти z80_iy: HL занят
+#     параметрами (L = dY, H = dZ), C — dX, B — счётчик, свободна только пара DE;
+#   * шаг записи — сложение младшего байта с явным `jp nc / inc d` вместо
+#     `ld de,32 : add iy,de` через z80_iy (шесть команд и два обращения к памяти);
+#   * is_object_not_ignored ВСТРОЕН: `ld a,(de) : and a` для +0 и `and 2` для +7
+#     (у оригинала `cpl : and 2`, то есть Z = «игнорировать»; здесь тот же смысл читается
+#     как NZ). Возврат из +7 к базе и шаг слиты в одно `add a,25`.
+#
+# ЧТО ДОЛЖНО ДОЙТИ ДО ВЫЗЫВАЮЩЕГО. Вызыватель один — adj_for_out_of_bounds:
+#   call adj_dY_for_obj_intersect : ... : ld (ix+9),c : ld (ix+10),l : ld (ix+11),h
+# то есть C (dX), L (dY) и H (dZ). B и DE у оригинала тоже гибнут, флаги не читает никто
+# (после вызова идёт `ld a,(ix+9)`). A мёртв: тело оригинала начиналось с
+# call is_object_not_ignored, который A перезаписывает.
+#
+# z80_iy пишется ровно там, где оригинал оставляет IY видимым снаружи: перед вызовами
+# do_objs_intersect_* и хелперов il_iy_* (они читают IY) и на выходе из цикла
+# (graphic_objs_tbl + a8_nobj*32 — то же значение, что у оригинала). На раннем выходе
+# `ret z` из «попадания» z80_iy уже показывает на текущего кандидата — как в оригинале.
+# 339 тактов на запись (213 цикла + 126 is_object_not_ignored) -> 63.
+# ---------------------------------------------------------------------------
+N_ADJ_DY = """adj_dY_for_obj_intersect:
+		ASSERT (graphic_objs_tbl & 31) <= 24	; иначе e+7 переносит
+		ld de, graphic_objs_tbl
+		ld a, (a8_nobj)			; только занятые записи
+		ld b, a
+ady_lp:
+		ld a, (de)			; +0 graphic_no — встроенный is_object_not_ignored
+		and a
+		jp z, ady_nx			; пустая запись
+		ld a, e
+		add a, 7
+		ld e, a				; -> +7 flags7
+		ld a, (de)
+		and 2				; бит 1 = «игнорировать» (у оригинала cpl : and 2)
+		jp nz, ady_nx7
+		ld a, e
+		sub 7
+		ld e, a				; обратно на базу записи
+		ex de, hl
+		ld (z80_iy), hl			; IY = кандидат: его читают do_objs_intersect_* и il_iy_*
+		ex de, hl
+		call do_objs_intersect_on_x
+		jp nc, ady_nx
+		call do_objs_intersect_on_z
+		jp nc, ady_nx
+ady_y:
+		call do_objs_intersect_on_y
+		jp nc, ady_nx
+		call il_ix_set
+		db 12, 1<<1
+		call il_ix_lda
+		db 13
+		rrca
+		and 0x40
+		call il_iy_or
+		db 13
+		call il_iy_sta
+		db 13
+		rlca
+		and 0x40
+		call il_ix_or
+		db 13
+		call il_ix_sta
+		db 13
+		call il_iy_bit
+		db 7, 1<<2
+		jp z, ady_h3
+		call il_ix_lda
+		db 10
+		call il_iy_sta
+		db 10
+ady_h3:
+		ld a, l
+		call adj_d_for_out_of_bounds
+		ld l, a
+		ret z				; z80_iy уже показывает на текущего кандидата
+		jp ady_y
+ady_nx7:
+		ld a, e
+		add a, 25			; −7 и сразу +32
+		ld e, a
+		jp nc, ady_st
+		inc d
+		jp ady_st
+ady_nx:
+		ld a, e
+		add a, 32
+		ld e, a
+		jp nc, ady_st
+		inc d
+ady_st:
+		dec b
+		jp nz, ady_lp
+		ex de, hl
+		ld (z80_iy), hl			; IY на выходе = graphic_objs_tbl + a8_nobj*32, как у оригинала
+		ex de, hl
+		ret
+        ; End of function adj_dY_for_obj_intersect
 """
