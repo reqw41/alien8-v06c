@@ -1060,7 +1060,44 @@ a8_sm_row:
 a8_menu_exit:
         ; полосу за собой убирать не надо: в игру идут через clear_scrn_buffer + update_screen,
         ; а палитру перебивает vec_set_pal по цвету комнаты (крючок в hooks())
+        ; ЗАМОК КНОПОК: игру запустили с зажатой FIRE — в игре она не должна тут же читаться как
+        ; прыжок и «взять». Замок снимает сам a8_in_joy, когда кнопку отпустят.
+        ; Сюда ПРОВАЛИВАЕТСЯ и a8_setmode — и это не вредно: в игре замок стоит ровно до первого
+        ; кадра с отпущенной кнопкой, а смена раскладки в меню кнопкой не делается.
+        ld a, 0xC0
+        ld (vec_joylck), a
         ret
+a8_joy_menu:   ; МЕНЮ: направление переключает раскладку ПО ФРОНТУ. По уровню одно отклонение стика
+        ; пролистало бы все три за кадр-другой: menu_loop крутится много раз в кадр, а vec_joyraw
+        ; обновляется раз в кадр. LEFT/UP — назад, RIGHT/DOWN — вперёд, по кругу 1->2->3->1.
+        ; Кнопка (старт игры) сюда не заходит: она сведена к клавише '0' прямо в рядах ZX (vec_joy),
+        ; и её разбирает та же строка меню, что и настоящую '0'.
+        ld hl, vec_joyprv
+        ld a, (vec_joyraw)
+        and 0x0F             ; только направления
+        ld b, a
+        xor (hl)
+        ld (hl), b
+        and b                ; 1 = нажато сейчас и НЕ было в прошлый раз
+        ret z
+        and 0x09             ; RIGHT | DOWN -> следующая раскладка
+        ld hl, tmp_input_method   ; номер раскладки 0..2
+        ld a, (hl)           ; ld a,(hl) флагов не трогает — Z ещё от `and`
+        jr z, a8_jm_prev
+        inc a
+        cp 3
+        jr c, a8_jm_set
+        xor a
+        jr a8_jm_set
+a8_jm_prev:
+        and a
+        jr nz, a8_jm_dec
+        ld a, 3
+a8_jm_dec:
+        dec a
+a8_jm_set:
+        ld (hl), a
+        jp a8_setmode        ; раскладка + полоса подсветки
 a8_modetab:   ; режим: user_input_method, нижняя строка полосы (Y+25), ширина в знакоместах
         DB 0, 160, 10   ; 1 KEYBOARD            (Y = 135, 10 знаков)
         DB 4, 136, 8    ; 2 CURSOR              (Y = 111,  8 знаков)
@@ -1299,7 +1336,8 @@ def a8_cut_controls(src, vec=False):
         "        ld (hl), a\n"
         "        call a8_setmode\n"
         "a8_ctl_done:\n"
-        "        ld a, 0xEF          ; ряд ZX 4: клавиши 0,9,8,7,6\n"
+        "        call a8_joy_menu    ; джойстик: раскладка по фронту направления\n"
+        "        ld a, 0xEF          ; ряд ZX 4: клавиши 0,9,8,7,6 ('0' прижимает и FIRE, см. vec_joy)\n"
         "        call read_key\n"
         "        bit 0, a            ; '0' — начать игру\n"
         "        jp nz, a8_menu_exit\n"
@@ -1310,6 +1348,7 @@ def a8_cut_controls(src, vec=False):
     cut(r'flash_menu:\n.*?        ; End of function flash_menu\n', 'flash_menu',
         A8_SETMODE_VEC if vec else
         'a8_setmode:\n        ret   ; полоса подсветки — только цель vec (плоскость 0 + палитра)\n'
+        'a8_joy_menu:\n        ret   ; джойстик — только цель vec (порт 0x0E)\n'
         'a8_menu_exit:\n        ret\n')
     cut(r'toggle_selected:\n.*?        ; End of function toggle_selected\n', 'toggle_selected')
 
