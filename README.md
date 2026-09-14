@@ -57,6 +57,16 @@ A8SFX=1:0:31:0:0 node tools/aytrace_vec.js ... > build/ay_e1.txt         # эф�
 | **2 CURSOR** | ← | → | ↑ | пробел | ↓ |
 | **3 DIRECTIONAL CONTROL** | стрелки = стороны света | | | пробел | `0`..`7` |
 
+## MiSTer (живое железо)
+Образ 64 КБ с загрузчиком в байте 0 кладётся как `.c00` (грузится по 0x0000; `.rom` лёг бы по 0x0100),
+запуск через `Alien8.mgl` по FIFO (`load_core`), скриншот с железа — `screenshot` в тот же FIFO:
+```bash
+sshpass -p 1 scp -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+  build/alien8_vec.r0m "root@192.168.1.124:/media/fat/games/VECTOR06/Alien 8.c00"
+sshpass -p 1 ssh root@192.168.1.124 '(echo "load_core /media/fat/Alien8.mgl" > /dev/MiSTer_cmd) & sleep 12; \
+  (echo screenshot > /dev/MiSTer_cmd) & sleep 4; ls -t /media/fat/screenshots/VECTOR06/ | head -1'
+```
+
 ## Каталоги
 - `tools/` — транслятор, гейты, профилировщики (берутся из knightlore-v06c и правятся под Alien 8); `gatecheck.py` вносит в них порчу и проверяет, что гейт её ловит
 - `src/` — asm-исходник игры (сборка дизассемблера tcdev под sjasmplus)
