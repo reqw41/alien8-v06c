@@ -1180,6 +1180,18 @@ a8_in_store:
         ld (user_input), a
         ret
         ; End of function check_user_input
+a8_anykey:   ; «ЛЮБАЯ КЛАВИША» = ряды ZX ПЛЮС ВЕСЬ ДЖОЙСТИК (подставляется в play_audio_until_keypress).
+        ; Кнопка в рядах ZX и так есть — vec_joy прижимает ей '0'. А НАПРАВЛЕНИЯ в ряды не сведены
+        ; (в ряду 0 матрицы Вектора со стрелками лежит ВК, ложная пауза = зависание), и без этой
+        ; строки мелодия меню играла бы свои полминуты, а стик за это время не пролистал бы ни одной
+        ; раскладки: menu_loop висит внутри play_audio_until_keypress и до a8_ctl_done не доходит.
+        ; У клавиатуры ровно так же: ЛЮБАЯ клавиша рвёт мелодию, и только поэтому работают '1'/'2'/'3'.
+        xor a
+        call read_key
+        ret nz
+        ld a, (vec_joyraw)
+        and a
+        ret
 a8_joy_r:   ; 1 KEYBOARD и 2 CURSOR (поворотные): «вниз» не заведено — его нет и у клавиатуры
         DB 0x02, 0x01   ; LEFT  -> поворот влево  (как Z / стрелка влево)
         DB 0x01, 0x02   ; RIGHT -> поворот вправо (как X / стрелка вправо)
@@ -1633,6 +1645,27 @@ def a8_vec_glue(src):
     return src
 
 
+def a8_joy_anykey(src):
+    """«Любая клавиша» в play_audio_until_keypress обязана слышать и джойстик (только цель vec).
+
+    Правится не текст драйвера звука (tools/a8_sound_ay.py не трогаем — там чужая ветка), а уже
+    склеенный исходник, ПОСЛЕ a8_sound_ay.apply: два места `xor a : call read_key` внутри
+    play_audio_until_keypress заменяются на `call a8_anykey` (он же читает ещё и vec_joyraw).
+
+    Зачем: мелодия меню играет десятки секунд, и всё это время menu_loop висит внутри
+    play_audio_until_keypress. Клавиша '1'/'2'/'3' работает только потому, что ЛЮБАЯ клавиша рвёт
+    мелодию; кнопка джойстика — потому что vec_joy прижимает ей '0' в рядах ZX. А направления в
+    ряды не сведены намеренно (в ряду 0 матрицы Вектора со стрелками лежит ВК = пауза), и без этой
+    правки отклонение стика в меню не делало бы РОВНО НИЧЕГО, пока мелодия не доиграет.
+    """
+    body = re.search(r'play_audio_until_keypress:\n.*?; End of function play_audio_until_keypress\n',
+                     src, flags=re.S)
+    assert body, 'a8_joy_anykey: play_audio_until_keypress не найдена'
+    new, n = re.subn(r'[ \t]*xor a\n[ \t]*call read_key\n', '        call a8_anykey\n', body.group(0))
+    assert n == 2, 'a8_joy_anykey: мест «любой клавиши» %d, ждали 2' % n
+    return src[:body.start()] + new + src[body.end():]
+
+
 def a8_glue(src, target):
     # меню и вырезание вариантов ввода ZX — ОБЕИМ целям (иначе локстеп судил бы чужое меню);
     # ввод через матрицу Вектора и пауза на ВК — только vec
@@ -1642,7 +1675,7 @@ def a8_glue(src, target):
     # Идёт ПОСЛЕ склейки: a8_vec.glue переносит адреса, записанные числом, и снимает
     # out (0xFE) по ИСХОДНОМУ тексту ZX-пути, который звук вырезает целиком.
     if target == 'vec':
-        return a8_sound_ay.apply(a8_vec_glue(src))[0]
+        return a8_joy_anykey(a8_sound_ay.apply(a8_vec_glue(src))[0])
     assert target == 'lockstep', target
     # Развёртка (ix+d) в горячих процедурах здесь ВЫКЛЮЧЕНА по умолчанию (темп на этой цели
     # не меряем), но `A8_IX_HOT=1` включает ТОТ ЖЕ список, что у цели vec: иначе гейт локстепа
