@@ -106,6 +106,16 @@ MUTS = [
          file="tools/a8_native_flip.py",
          old="        and 0xC0\n        ret z   ; быстрый путь: ориентация уже нужная\n",
          new="        and 0x80\n        ret z   ; быстрый путь: ориентация уже нужная\n"),
+    dict(name="tune", gate="tunecheck",
+         why="команда END потока нот не распознаётся (cp 7 -> cp 8): мелодия не кончается",
+         file="tools/a8_sound_ay.py",
+         old="\t\t\t\tcp\t\t7\n\t\t\t\tjp\t\tz, mf_end\n",
+         new="\t\t\t\tcp\t\t8\n\t\t\t\tjp\t\tz, mf_end\n"),
+    dict(name="sfx", gate="aycheck",
+         why="период шума эффекта 1 маскируется 0x3F вместо 0x1F: R6 расходится с моделью MSX",
+         file="tools/a8_sound_ay.py",
+         old="\t\t\t\tcpl\n\t\t\t\tand\t\t0x1F\n\t\t\t\tld\t\tb, a\n\t\t\t\tld\t\tc, 6\n",
+         new="\t\t\t\tcpl\n\t\t\t\tand\t\t0x3F\n\t\t\t\tld\t\tb, a\n\t\t\t\tld\t\tc, 6\n"),
 ]
 
 ENV = {"i8080": {"A8_GATECHECK_I8080": "1"},
@@ -173,6 +183,18 @@ def gate_result(gate, env=None):
     elif gate == "inputcheck":
         r = run(["node", "tools/inputcheck_vec.js", "build/alien8_vec.r0m",
                  "build/alien8_vec.sld"], env)
+    elif gate == "tunecheck":
+        # все шесть мелодий целиком: длительность в кадрах против модели MSX
+        r = run(["node", "tools/tunecheck_vec.js", "build/alien8_vec.r0m",
+                 "build/alien8_vec.sld"], env)
+    elif gate == "aycheck":
+        # эффект 1 (шум) сценарием ходьбы не достаётся — запускаем принудительно,
+        # журнал записей AY сверяется с моделью поканально
+        e = dict(env or {}); e["A8SFX"] = "1:0:31:0:0"
+        t = run(["node", "tools/aytrace_vec.js", "build/alien8_vec.r0m",
+                 "build/alien8_vec.sld", "60"], e)
+        open(os.path.join(ROOT, "build", "ay_gatecheck.txt"), "w", encoding="utf-8").write(t.stdout)
+        r = run(["python3", "tools/aycheck.py", "build/ay_gatecheck.txt"], env)
     elif gate == "kbcheck":
         # эталон tools/kbref.txt лежит В РЕПОЗИТОРИИ: без него гейт сверял бы таблицу
         # готовых ответов read_key саму с собой и любую правку vec_zxmap пропускал (§22 KL)

@@ -86,7 +86,7 @@ io.output = function (port, w) {
 
 // ---------------- события драйвера ----------------
 const T = L.graphic_objs_tbl, SFX = L.msx_sfx, CH = L.msx_ch, STREAM = L.msx_stream, PLAY = L.msx_play;
-let phase = process.env.A8MENU ? "menuplay" : "menu", iter = 0, startIter = 0;
+let phase = process.env.A8MENU ? "menuplay" : "menu", iter = 0, startIter = 0, startseq = null;
 // A8SFX: hi:lo можно задать именем списка эффекта 9 — "e9a" / "e9b" (адрес берётся из .sld)
 const FSFX = process.env.A8SFX ? (function (p) {
   if (p.length === 4) { const a = L["msx_" + p[3]]; if (a === undefined) throw new Error("нет метки msx_" + p[3]);
@@ -110,7 +110,12 @@ memory.write = function (a, w, s) {
       ow(SFX + sl * 4, id, false); ow(SFX + sl * 4 + 1, tk, false);
       ow(SFX + sl * 4 + 2, hi, false); ow(SFX + sl * 4 + 3, lo, false);
       ow(L.msx_busy, 1, false);
-      console.log("SFX " + frame + " " + sl + " " + id + " " + tk + " " + hi + " " + lo + " " +
+      // указатель списка эффекта 9 печатаем в адресах MSX — модель читает списки из картриджа
+      let h2 = hi, l2 = lo;
+      if (id === 9) { const a16 = hi | (lo << 8);
+        const m = a16 === L.msx_e9a ? 0x456F : a16 === L.msx_e9b ? 0x457A : 0;
+        if (m) { h2 = m & 0xFF; l2 = m >> 8; } }
+      console.log("SFX " + frame + " " + sl + " " + id + " " + tk + " " + h2 + " " + l2 + " " +
                   memory.read(L.msx_stepc, false) + " " + memory.read(T + 1, false) + " " + memory.read(T + 2, false));
     }
   }
@@ -118,13 +123,30 @@ memory.write = function (a, w, s) {
     const p = memory.read(CH + 14, false) | (memory.read(CH + 15, false) << 8);
     console.log("TUNE " + frame + " " + (p - STREAM));
   }
-  if (a >= SFX && a < SFX + 12 && ((a - SFX) % 4) === 3) {
-    const s = (a - SFX) >> 2, id = memory.read(SFX + s * 4, false);
-      // для эффекта 3 («шаги») в модель нужны живые счётчик шагов и координаты игрока
-    if (id !== 0) console.log("SFX " + frame + " " + s + " " + id + " " + memory.read(SFX + s * 4 + 1, false) + " " +
-                              memory.read(SFX + s * 4 + 2, false) + " " + w + " " +
-                              memory.read(L.msx_stepc, false) + " " +
-                              memory.read(T + 1, false) + " " + memory.read(T + 2, false));
+  // ЗАПУСК эффекта отличается от тика по ПОРЯДКУ записей в дескриптор: msx_sfx_start пишет
+  // +0,+1,+2,+3 подряд, а тик эффекта 9 переписывает указатель как +3, потом +2. Без этого
+  // различения каждый тик эффекта 9 выглядел бы новым запуском и обрывал сверку.
+  if (a >= SFX && a < SFX + 12) {
+    const s = (a - SFX) >> 2, off = (a - SFX) % 4;
+    if (off === 0) startseq = [s, 1];
+    else if (startseq && startseq[0] === s && startseq[1] === off) {
+      startseq[1]++;
+      if (off === 3) {
+        const id = memory.read(SFX + s * 4, false);
+        let p2 = memory.read(SFX + s * 4 + 2, false), p3 = w;
+        // Эффект 9 держит в параметре УКАЗАТЕЛЬ на список периодов. Модель читает списки
+        // из картриджа MSX, поэтому наш адрес переводим в адрес MSX (0x456F / 0x457A).
+        if (id === 9) { const a16 = p2 | (p3 << 8);
+          const m = a16 === L.msx_e9a ? 0x456F : a16 === L.msx_e9b ? 0x457A : 0;
+          if (m) { p2 = m & 0xFF; p3 = m >> 8; } }
+        // для эффекта 3 («шаги») в модель нужны живые счётчик шагов и координаты игрока
+        if (id !== 0) console.log("SFX " + frame + " " + s + " " + id + " " + memory.read(SFX + s * 4 + 1, false) + " " +
+                                  p2 + " " + p3 + " " +
+                                  memory.read(L.msx_stepc, false) + " " +
+                                  memory.read(T + 1, false) + " " + memory.read(T + 2, false));
+        startseq = null;
+      }
+    } else startseq = null;
   }
   return ow(a, w, s);
 };

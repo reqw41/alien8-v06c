@@ -88,18 +88,32 @@ def check_tune(idx, name, f0, writes, nframes, rep):
         if n == 0:
             continue
         mism = 0
+        tail = 0
         shift = set()
         for i in range(n):
             (p, r, v), (f, r2, v2) = mc[i], oc[i]
             if (r, v) != (r2, v2):
+                # ХВОСТ ПОСЛЕ END. У MSX END останавливает проигрыватель посреди «прохода»,
+                # и каналы, до которых очередь в этом проходе не дошла, замолкают сразу.
+                # У нас каждый канал отматывает свои 114 проходов ПОДРЯД, поэтому канал,
+                # обслуживаемый раньше канала с END, успевает сделать ещё одну выборку в
+                # последнем кадре. Слышимого следа нет: сразу за ней идёт список тишины.
+                # Допуск — не больше одной такой записи на канал.
+                if (r, v) in STOP and i >= len(mc) - len(STOP):
+                    tail += 1
+                    continue
                 mism += 1
                 if mism <= 3:
                     print('  канал %s запись %d: модель R%d=%02X, у нас R%d=%02X'
                           % (CHNAME[ch], i, r, v, r2, v2))
             shift.add(f - (f0 + (p - 1) // PASSES + 1))
+        if tail > 1:
+            print('  канал %s: хвост после END длиннее одной записи (%d) — это уже дефект' % (CHNAME[ch], tail))
+            mism += tail
         bad += mism
-        print('  канал %s: сверено %d записей (модель %d, у нас %d), расхождений %d, сдвиг кадра %s'
+        print('  канал %s: сверено %d записей (модель %d, у нас %d), расхождений %d%s, сдвиг кадра %s'
               % (CHNAME[ch], n, len(mc), len(oc), mism,
+                 (', хвост после END %d' % tail) if tail else '',
                  ','.join(str(x) for x in sorted(shift)) if shift else '-'))
     rep.append((name, bad))
     return bad
