@@ -225,18 +225,19 @@ sd_y2:		ld hl, sd_il+1
 		ld de, 32			; шаг записи живёт в DE весь цикл
 		ld a, (a8_nobj)
 		ld b, a
+		; Раннего отсева «у объекта уже стоит DRAW» здесь НЕТ, и это ЗАМЕР, а не упущение:
+		; sd_n7 - sd_ie = 1.5 объекта на вызов в стартовой (1.5 в 104 и 39, 3.6 в 48, 4.5 в 56,
+		; 6.0 в 88) против 12..40 кандидатов, дошедших до осей. Ранняя проверка стоила на КАЖДОМ
+		; занятом объекте 44 такта (адрес +7 и чтение флага) + 20 тактов отката l-7 на выходе,
+		; то есть 64 такта, а экономила ~90 тактов на тех редких 1.5..6. Теперь HL весь цикл
+		; стоит на +0, флаг читается и ставится ТОЛЬКО в sd_set (or 0x10 идемпотентен, поэтому
+		; повторная пометка уже помеченного объекта ничего не меняет — локстеп байт в байт).
 sd_loop:	ld a, (hl)			; graphic_no
 		or a
 		jp z, sd_next
+		push hl				; +0 записи
 		ld a, l
-		add a, 7
-		ld l, a				; -> +7 (переноса нет, см. ASSERT)
-		ld a, (hl)
-		and 0x10			; уже DRAW?
-		jp nz, sd_n7
-		push hl
-		ld a, l
-		add a, 19
+		add a, 26
 		ld l, a
 		jp nc, sd_p26
 		inc h
@@ -271,15 +272,17 @@ sd_yneg:	cpl
 		dec hl				; -> +25 высота кандидата
 		cp (hl)
 		jp nc, sd_pn
-sd_set:		pop hl				; -> +7
+sd_set:		pop hl				; -> +0
+		ld c, l				; C в цикле свободен (счётчик в B, шаг в DE)
+		ld a, l
+		add a, 7
+		ld l, a				; -> +7 (переноса нет, см. ASSERT)
 		ld a, (hl)
 		or 0x10				; set 4 — пометить DRAW
 		ld (hl), a
-		jp sd_n7
+		ld l, c				; обратно на +0
+		jp sd_next
 sd_pn:		pop hl
-sd_n7:		ld a, l
-		sub 7
-		ld l, a
 sd_next:	add hl, de
 		dec b
 		jp nz, sd_loop
@@ -1060,24 +1063,22 @@ wno_win:
 # calc_plyr_dXY. jump_to_upd_object — точка входа для upd_3F.
 # ---------------------------------------------------------------------------
 N_UPD_LOOP = """update_sprite_loop:
+		ld hl, (z80_ix)			; вход ИЗВНЕ: указатель записи только в z80_ix
+usl_body:					; вход из ret_from_tbl_jp: HL уже = запись объекта
 		ld sp, %(sp)s
-		ld hl, ret_from_tbl_jp		; адрес возврата обработчика
-		push hl
-		ld hl, (z80_ix)
+		ld de, ret_from_tbl_jp		; адрес возврата обработчика — через DE, чтобы HL цел
+		push de
+		ld c, (hl)			; graphic_no, пока HL ещё на +0 (обработчик его не трогал)
+		ld de, 24
+		add hl, de			; HL = +24 (ширина, высота, X, Y)
 		ld d, h
 		ld e, l
-		ld a, l
-		add a, 24
-		ld l, a
-		ld a, h
-		adc a, 0
-		ld h, a				; HL = +24 (ширина, высота, X, Y)
 		ld a, e
-		add a, 28
+		add a, 4
 		ld e, a
-		ld a, d
-		adc a, 0
-		ld d, a				; DE = +28 (их «старые» копии)
+		jp nc, usl_d0
+		inc d
+usl_d0:						; DE = +28 (их «старые» копии)
 		ld a, (hl)
 		ld (de), a
 		inc hl
@@ -1092,10 +1093,7 @@ N_UPD_LOOP = """update_sprite_loop:
 		inc de
 		ld a, (hl)
 		ld (de), a
-jump_to_upd_object:
-		ld hl, (z80_ix)
-		ld a, (hl)			; graphic_no -> номер обработчика
-		ld l, a
+		ld l, c				; graphic_no -> номер обработчика (H обнулит jump_to_tbl_entry)
 		ld bc, upd_sprite_jmp_tbl
 jump_to_tbl_entry:
 		ld h, 0
@@ -1110,7 +1108,8 @@ jump_to_tbl_entry:
 ret_from_tbl_jp:
 		; ЗВУК: тик эффектов MSX — по разу на объект, ровно как MSX 0x4132. Проверка
 		; «занят ли хоть один слот» стоит здесь, а не внутри тика: в тишине (обычное
-		; состояние) это 28 тактов на объект вместо 109.
+		; состояние) это 28 тактов на объект вместо 109. Регистры тут мертвы: обработчик
+		; объекта только что вернулся, а тело цикла первым делом делает ld hl, (z80_ix).
 		ld a, (msx_busy)
 		or		a
 		call nz, msx_sfx_tick
@@ -1129,12 +1128,21 @@ usl_nc:		ld (z80_ix), hl
 		sub l
 		ld a, d
 		sbc a, h			; конец занятой части пройден?
-		jp c, update_sprite_loop
+		jp c, usl_next
 		; ЗВУК: у MSX объектный цикл всегда 56 проходов, а наш ходит до a8_nobj
 		; (16..48 занятых записей). Недостающие 56 - a8_nobj тиков добираем здесь,
 		; иначе длительности эффектов (7..31 тик) поплыли бы по комнатам в 3.5 раза.
 		call msx_sfx_rest
 		jp done_sprite_updates
+usl_next:	ex de, hl			; HL = следующая запись — усечённый вход в тело
+		jp usl_body
+        ; ---------------------------------------------------------------------------
+jump_to_upd_object:				; точка входа для upd_3F: указатель только в z80_ix
+		ld hl, (z80_ix)
+		ld a, (hl)			; graphic_no -> номер обработчика
+		ld l, a
+		ld bc, upd_sprite_jmp_tbl
+		jp jump_to_tbl_entry
         ; ---------------------------------------------------------------------------
 """
 
