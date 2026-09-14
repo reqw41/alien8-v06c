@@ -4,7 +4,7 @@
 Обе игры — Ultimate 1984–85, движок Filmation, один автор дизассемблера (tcdev).
 
 Материалы (образы игр, дизассемблер, стенды): `~/projects/alien8-research/`.
-Темп оригиналов по комнатам: ZX — `tools/zxpace_zx.lua`, MSX — `~/projects/alien8-research/msx/SPEED.md` (раздел «Темп MSX-версии по комнатам» в журнале).
+Темп трёх оригиналов по комнатам: ZX — `tools/zxpace_zx.lua`, MSX — `~/projects/alien8-research/msx/SPEED.md`, CPC — `~/projects/alien8-research/cpc/SPEED.md` (сводная таблица — в журнале, раздел «Темп MSX- и CPC-версий по комнатам»).
 Готовый порт-образец со всеми инструментами: `~/projects/knightlore-v06c/`.
 
 ## Состояние (2026-09-12)
