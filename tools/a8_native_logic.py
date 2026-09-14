@@ -115,6 +115,7 @@ _BODIES = [
     ('do_objs_intersect_on_y', 'N_INTERSECT_Y'),
     ('sub_AE03', 'N_SUB_AE03'),
     ('adj_dY_for_obj_intersect', 'N_ADJ_DY'),
+    ('adj_dZ_for_obj_intersect', 'N_ADJ_DZ'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -1589,4 +1590,133 @@ ady_st:
 		ex de, hl
 		ret
         ; End of function adj_dY_for_obj_intersect
+"""
+
+
+# ---------------------------------------------------------------------------
+# adj_dZ_for_obj_intersect — 1.6 % тактов комнаты 48 (1.0 вызов × 31 запись) плюс
+# оставшаяся доля is_object_not_ignored. Скелет переписан точно так же, как у adj_dY:
+# указатель кандидата в DE, шаг сложением младшего байта, встроенный is_object_not_ignored,
+# «попадание» — дословно тем же кодом транслятора (включая развёрнутый `set 3,(iy+13)`,
+# который сам сохраняет HL через il_tmp2 и DE не трогает).
+#
+# Вызыватель один — adj_for_out_of_bounds (ветка dZ_ok): после возврата читает C/L/H,
+# затем `ld a,(ix+9)`, то есть A и флаги мертвы. A на входе тоже мёртв (`ld a,h : and a`
+# перед вызовом, а тело начиналось с call is_object_not_ignored).
+# ---------------------------------------------------------------------------
+N_ADJ_DZ = """adj_dZ_for_obj_intersect:
+		ASSERT (graphic_objs_tbl & 31) <= 24	; иначе e+7 переносит
+		ld de, graphic_objs_tbl
+		ld a, (a8_nobj)			; только занятые записи
+		ld b, a
+adz_lp:
+		ld a, (de)			; +0 graphic_no — встроенный is_object_not_ignored
+		and a
+		jp z, adz_nx
+		ld a, e
+		add a, 7
+		ld e, a				; -> +7 flags7
+		ld a, (de)
+		and 2				; бит 1 = «игнорировать»
+		jp nz, adz_nx7
+		ld a, e
+		sub 7
+		ld e, a				; обратно на базу записи
+		ex de, hl
+		ld (z80_iy), hl			; IY = кандидат
+		ex de, hl
+		call do_objs_intersect_on_x
+		jp nc, adz_nx
+		call do_objs_intersect_on_y
+		jp nc, adz_nx
+adz_z:
+		call do_objs_intersect_on_z
+		jp nc, adz_nx
+		call il_ix_set
+		db 12, 1<<2
+		call il_ix_lda
+		db 13
+		rrca
+		and 0x40
+		call il_iy_or
+		db 13
+		call il_iy_sta
+		db 13
+		rlca
+		and 0x40
+		call il_ix_or
+		db 13
+		call il_ix_sta
+		db 13
+		call il_ix_bit
+		db 7, 1<<2
+		jp z, adz_h9
+		call il_ix_lda
+		db 0
+		sub 0x10
+		cp 0x20
+		jp nc, adz_h7
+		push af
+		ld (il_tmp2),hl
+		ld hl,(z80_iy)
+		ld a,l
+		add a,(13)&255
+		ld l,a
+		ld a,h
+		adc a,((13)>>8)&255
+		ld h,a
+		ld a,(hl)
+		or 1<<3
+		ld (hl),a
+		ld hl,(il_tmp2)
+		pop af
+adz_h7:
+		call il_ix_lda
+		db 11
+		call il_iy_sta
+		db 11
+		call il_ix_lda
+		db 9
+		and a
+		jp nz, adz_h8
+		call il_iy_lda
+		db 9
+		call il_ix_sta
+		db 9
+adz_h8:
+		call il_ix_lda
+		db 10
+		and a
+		jp nz, adz_h9
+		call il_iy_lda
+		db 10
+		call il_ix_sta
+		db 10
+adz_h9:
+		ld a, h
+		call adj_d_for_out_of_bounds
+		ld h, a
+		ret z				; z80_iy уже показывает на текущего кандидата
+		jp adz_z
+adz_nx7:
+		ld a, e
+		add a, 25			; −7 и сразу +32
+		ld e, a
+		jp nc, adz_st
+		inc d
+		jp adz_st
+adz_nx:
+		ld a, e
+		add a, 32
+		ld e, a
+		jp nc, adz_st
+		inc d
+adz_st:
+		dec b
+		jp nz, adz_lp
+		ex de, hl
+		ld (z80_iy), hl			; IY на выходе = graphic_objs_tbl + a8_nobj*32
+		ex de, hl
+		ret
+        ; End of function adj_dZ_for_obj_intersect
 """
