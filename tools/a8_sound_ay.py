@@ -206,8 +206,7 @@ msx_stop_tune:	xor		a
 				jp		msx_silence
 
 msx_frame:		; один видеокадр мелодии: ждём обратного хода и отматываем проходы
-				ei							; кадровое прерывание Вектора не защёлкивается:
-				halt						;   ждать можно ТОЛЬКО ei/halt
+%(wait)s
 msx_mtick:		ld		a, (msx_play)
 				or		a
 				ret		z
@@ -745,4 +744,335 @@ msx_frame_off:	; конец игровой итерации: полное глу
 				or		a
 				ret		nz
 				jp		msx_silence
-""") % {'passes': MSX_PASSES, 'ticks': MSX_TICKS}
+""")
+
+
+WAIT_VEC = ('\t\t\t\tei\t\t\t\t\t\t\t; кадровое прерывание Вектора не защёлкивается:\n'
+            '\t\t\t\thalt\t\t\t\t\t\t;   ждать можно ТОЛЬКО ei/halt')
+WAIT_LOCKSTEP = ('\t\t\t\t; цель lockstep: прерываний нет вовсе, кадр не ждём\n'
+                 '\t\t\t\t; (темп на этой цели не судят, а halt повесил бы прогон навсегда)')
+
+
+def driver(target):
+    return DRIVER % {'passes': MSX_PASSES, 'ticks': MSX_TICKS,
+                     'wait': WAIT_VEC if target == 'vec' else WAIT_LOCKSTEP}
+
+
+
+
+
+# ============================================================================
+#  Точки входа, которые видит игровой код. Имена ZX сохранены — сайты вызова не
+#  трогаются, кроме пяти, где одна ZX-процедура на MSX разошлась по разным
+#  адресатам (они перечислены в apply). Соответствие установлено построчной
+#  сверкой всех 33 ZX-сайтов с 27 адресами движка MSX:
+#  ~/projects/alien8-research/msx/SFX_SITES.md.
+#  Этот текст вставляется ДО трансляции Z80 -> i8080, поэтому (ix+d) здесь законны.
+# ============================================================================
+GAME_HOOKS = """
+; ---- звук из игрового кода: имена ZX сохранены, внутри — эффекты и мелодии MSX ----
+; Три опорные формулы, по которым проверена вся таблица: эффект 7 берёт период из
+; ~((ix+1)+(ix+2)+(ix+3)) (ZX audio_B654), эффект 4 — из ~(ix+3) (ZX audio_B63C),
+; эффект 3 «шаги» считает громкость из координат игрока ровно как ZX loc_B6E6.
+
+audio_B62C:
+        ; прыжок (MSX 0x6034: ld (ix+11),8 : push bc : ld hl,0x4541 : call 0x439D : pop bc)
+        ; -> эффект 5, слот 1 / канал B, 31 тик, период ((c<<2) & 0xFF) ^ 0xA0
+        ld de, 0
+        ld a, 5
+        ld b, 0x1F
+        ld c, 1
+        jp msx_sfx_start
+        ; End of function audio_B62C
+
+audio_B63C:
+        ; MSX 0x4506: эффект 4, слот 1 / канал B, 31 тик, 8-битный период ~(ix+3)
+        ld a, (ix+3)
+audio_B63F:
+        ; короткий вход: A уже загружен вызывателем (MSX 0x4509)
+        cpl
+        ld e, a
+        ld d, 0
+        ld a, 4
+        ld b, 0x1F
+        ld c, 1
+        jp msx_sfx_start
+        ; End of function audio_B63C
+
+audio_B64A:
+        ; MSX 0x4A93 ... : на ZX здесь (ix+1), на MSX обе строки (B64A и B64F) зовут
+        ; ОДИН вход 0x44E8 с суммой координат — воспроизводим MSX, а не ZX
+        jp audio_B654
+audio_B64F:
+        jp audio_B654
+
+audio_B654:
+        ; MSX 0x44E8 — эталонная формула: эффект 7, слот 1 / канал B, 7 тиков,
+        ; период = ~((ix+1)+(ix+2)+(ix+3))
+        ld a, (ix+1)
+        add a, (ix+2)
+        add a, (ix+3)
+        cpl
+        ld e, a
+        ld d, 0
+audio_msx_e7:
+        ; общий хвост: DE = период (16 бит), эффект 7
+        ld a, 7
+        ld b, 7
+        ld c, 1
+        jp msx_sfx_start
+        ; End of function audio_B654
+
+audio_msx_e7hl:
+        ; вход MSX 0x44F5: период УЖЕ в HL (у ZX этому соответствуют sub_B5EE/sub_B604
+        ; и два сайта toggle_FE_bit4_x16)
+        ld e, l
+        ld d, h
+        jr audio_msx_e7
+
+sub_B5EE:
+        ; искры распада (MSX 0x54CF через общий хвост 0x54C3): эффект 7,
+        ; период = (~((ix+0) >>> 3)) AND 0xE0 — нисходящая гамма по номеру кадра спрайта
+        ld a, (ix+0)
+        rrca
+        rrca
+        rrca
+        cpl
+        and 0xE0
+        ld l, a
+        ld h, 0
+        jr audio_msx_e7hl
+        ; End of function sub_B5EE
+
+sub_B604:
+        ; MSX слил этот звук с предыдущим: 0x5A8E jp 0x54C3 — тот же хвост
+        jp sub_B5EE
+        ; End of function sub_B604
+
+sub_B619:
+        ; MSX 0x447C: эффект 2, слот 0 / канал A, 15 тиков, нисходящий чирп 0x100 + 2c
+        ld de, 0
+        ld a, 2
+        ld b, 0x0F
+        ld c, 0
+        jp msx_sfx_start
+        ; End of function sub_B619
+
+sub_B676:
+        ; MSX 0x445E: эффект 1 «шум», слот 0 / канал A, 31 тик,
+        ; громкость 15->0, период шума 1..30
+        ld de, 0
+        ld a, 1
+        ld b, 0x1F
+        ld c, 0
+        jp msx_sfx_start
+        ; End of function sub_B676
+
+audio_msx_e9a:
+        ; MSX 0x4B5A и 0x515A (дескриптор 0x456B): эффект 9, слот 1, 7 тиков,
+        ; период по зацикленному списку 10 18 20 28
+        ld d, low msx_e9a
+        ld e, high msx_e9a
+        jr audio_msx_e9
+audio_msx_e9b:
+        ; MSX 0x4BB8 (дескриптор 0x4576): список 60 44 30 38
+        ld d, low msx_e9b
+        ld e, high msx_e9b
+audio_msx_e9:
+        ld a, 9
+        ld b, 7
+        ld c, 1
+        jp msx_sfx_start
+
+loc_B6C0:
+        ; MSX 0x4B5A — эффект 9 со списком 10 18 20 28 (проверки (ix+0) AND 1 у MSX нет)
+        jp audio_msx_e9a
+
+audio_B6CE:
+        ; шаги (MSX 0x6062 -> 0x4493): проверку «нечётный кадр» оригинал ZX держит в теле,
+        ; на MSX она вынесена в сайт 0x605B — эффект тот же, сохраняем ZX-структуру
+        ld a, (ix+0)
+        and 1
+        ret nz
+loc_B6D4:
+        ; вход мимо проверки (ZX-сайт 6301)
+        ; -> эффект 3, слот 2 / канал C, 23 тика: нота из таблицы 16 нот по msx_stepc AND 0x0F,
+        ; громкость 8..15 из координат игрока (graphic_objs_tbl+1/+2)
+        ld hl, msx_stepc
+        inc (hl)
+        ld de, 0
+        ld a, 3
+        ld b, 0x17
+        ld c, 2
+        jp msx_sfx_start
+        ; End of function audio_B6CE
+
+toggle_FE_bit4_x16:
+        ; подбор/сброс предмета (upd_3F, MSX 0x5B98) и лишняя жизнь (upd_0C, MSX 0x5D13):
+        ; эффект 7 с ПОСТОЯННЫМ периодом 0x0040
+        ld hl, 0x0040
+        jp audio_msx_e7hl
+
+toggle_FE_bit4_x32:
+        ; MSX 0x4555: эффект 8, слот 0 / канал A, 7 тиков, фиксированный период 0x0020
+        ld de, 0
+        ld a, 8
+        ld b, 7
+        ld c, 0
+        jp msx_sfx_start
+
+toggle_FE_bit4_x24:
+        ; пауза (audio_CE22): на MSX 0x6B4B и 0x6B63 — мелодия «блип» 0x477E
+audio_msx_blip:
+        ld de, msx_hdr_blip
+        jp play_audio
+        ; End of function toggle_FE_bit4_x16
+
+audio_msx_ladder:
+        ; ЗВУК ВНЕ ДВИЖКА (MSX 0x50F5..0x5117): восемь нисходящих ступеней на канале A,
+        ; период (B-1)*16, громкость 15, пауза между ступенями. У MSX паузой служит
+        ; перерисовка (0x41CC) — у нас это меняло бы состояние игры, поэтому пустой цикл.
+        xor a
+        ld (msx_si), a                          ; слот 0 -> канал A
+        call msx_tone_on
+        ld b, 8
+aml_l:  ld a, b
+        dec a
+        rlca
+        rlca
+        rlca
+        rlca
+        ld e, a
+        ld d, 0
+        push bc
+        call msx_setper
+        ld a, 0x0F
+        call msx_setvol
+        ld de, 0x0400
+aml_d:  dec de
+        ld a, d
+        or e
+        jr nz, aml_d
+        pop bc
+        djnz aml_l
+        xor a
+        call msx_setvol                         ; гасим канал A
+        ret
+
+; ---- проигрыватели мелодий: имена ZX, тела MSX (проигрыватель блокирующий) ----
+play_audio_wait_key:
+        ld hl, audio_played
+        ld a, (hl)
+        and a
+        ret nz
+        set 0, (hl)
+        ; End of function play_audio_wait_key
+
+play_audio_until_keypress:
+        ; MSX 0x45B6 (A := 1): играть, прерываясь ЛЮБОЙ клавишей
+        xor a
+        call read_key
+        ret nz                                  ; клавиша уже нажата — не играем (как ZX)
+        ex de, hl
+        call msx_play_tune
+pauk_l:
+        call msx_frame
+        ld a, (msx_play)
+        or a
+        jp z, pauk_r
+        xor a
+        call read_key
+        jp z, pauk_l
+        jp msx_stop_tune
+pauk_r:
+        ret
+        ; End of function play_audio_until_keypress
+
+play_audio:
+        ; MSX 0x45BA (A := 0): играть до конца. Ждать ОБЯЗАТЕЛЬНО: на MSX проигрыватель
+        ; блокирующий, а под `di` в print_sprite Вектор теряет кадровые прерывания.
+        ex de, hl
+        call msx_play_tune
+pa_l:
+        call msx_frame
+        ld a, (msx_play)
+        or a
+        jp nz, pa_l
+        ret
+        ; End of function play_audio
+"""
+
+
+def apply(src):
+    """Вырезать ZX-звук и вставить крючки MSX. Возвращает (src, отчёт по вырезанному)."""
+    rep = {}
+
+    def cut(pattern, name, repl='', flags=re.S):
+        nonlocal src
+        m = re.search(pattern, src, flags)
+        assert m, 'a8_sound_ay: не найдено — ' + name
+        rep[name] = len(m.group(0))
+        src = src[:m.start()] + repl + src[m.end():]
+
+    def site(old, new, name):
+        nonlocal src
+        assert src.count(old) == 1, 'a8_sound_ay: сайт не уникален — ' + name
+        src = src.replace(old, new, 1)
+        rep['сайт: ' + name] = 0
+
+    # --- 1. сайты, где одна ZX-процедура на MSX разошлась по разным адресатам ---
+    site("        ld hl, byte_B6A9\n        call audio_B690\n",
+         "        call audio_msx_e9a   ; MSX 0x4B5A: эффект 9, список 10 18 20 28\n",
+         'upd_66..: эффект 9, список A')
+    # на цели vec a8_vec.glue уже перенесла число 0xB6AD в метку byte_B6A9+4
+    cut(r'        ld hl, (?:0xB6AD|byte_B6A9\+4)\n        call audio_B690\n',
+        'upd_6E..: эффект 9, список B',
+        "        call audio_msx_e9b   ; MSX 0x4BB8: эффект 9, список 60 44 30 38\n")
+    site("        jr nz, loc_B00B\n        call sub_B5EE\n",
+         "        jr nz, loc_B00B\n        call audio_msx_ladder   ; MSX 0x50F5: лесенка на канале A\n",
+         'фанфара: ручная лесенка вместо эффекта')
+    site("        call toggle_FE_bit4_x16\n        inc (ix+17)\n",
+         "        ; MSX: звука здесь НЕТ (0x4CD2 идёт из ld (ix+10),a прямо в inc (ix+11));\n"
+         "        ; доказательство — SFX_SITES.md §5. Единственный такой случай из 33.\n"
+         "        inc (ix+17)\n",
+         'upd_50: на MSX звука нет')
+    site("        call a8_setmode\na8_ctl_done:\n",
+         "        call a8_setmode\n"
+         "        call audio_msx_blip   ; MSX 0x5905: смена настройки в меню -> мелодия «блип»\n"
+         "a8_ctl_done:\n",
+         'меню: блип при смене настройки')
+
+    # --- 2. весь ZX-путь звука одним куском: мелодии, проигрыватель на бипере, freq_tbl,
+    #        процедуры audio_B*/sub_B*/toggle_FE_* -> крючки на движок MSX ---
+    cut(r'start_game_tune:\n.*?; End of function toggle_FE_bit4\n', 'ZX-путь звука',
+        ';\n; Мелодии: данные из MSX-версии, имена ZX = адреса заголовков\n;\n'
+        'start_game_tune:\t\tEQU\tmsx_hdr_start_game\n'
+        'obj_5C_tune:\t\t\tEQU\tmsx_hdr_obj_5C\n'
+        'game_over_tune:\t\t\tEQU\tmsx_hdr_game_over\n'
+        'game_complete_tune:\t\tEQU\tmsx_hdr_game_complete\n'
+        'menu_tune:\t\t\t\tEQU\tmsx_hdr_menu\n'
+        + GAME_HOOKS +
+        '\n; __A8_SOUND_DRIVER__ (ядро драйвера и данные подставляются ПОСЛЕ трансляции)\n')
+
+    # --- 3. тик эффектов: конец игровой итерации — глушение AY (MSX 0x41A3, точка слияния
+    #        обеих ветвей конца кадра: с панелью и без) ---
+    site("loc_A72E:\n        call audio_CE22\n",
+         "loc_A72E:\n        call msx_frame_off   ; MSX 0x41A3: глушение AY в конце игрового кадра\n"
+         "        call audio_CE22\n",
+         'глушение AY в конце итерации')
+
+    # --- 4. инициализация звука: MSX 0x40AA (глушение + тень R7 := 0xBF) — та же точка
+    #        слияния START/start_menu, что и у ZX loc_A650 ---
+    site("loc_A650:\n        call build_lookup_tbls\n",
+         "loc_A650:\n        call msx_snd_init   ; MSX 0x40AA: глушение AY и тень R7 := 0xBF\n"
+         "        call build_lookup_tbls\n",
+         'инициализация звука при старте')
+
+    return src, rep
+
+
+def emit(src, target):
+    """ПОСЛЕ трансляции: подставить ядро драйвера и данные на место маркера."""
+    mark = '; __A8_SOUND_DRIVER__ (ядро драйвера и данные подставляются ПОСЛЕ трансляции)'
+    assert src.count(mark) == 1, 'a8_sound_ay: маркер драйвера'
+    return src.replace(mark, driver(target) + data_block(), 1)

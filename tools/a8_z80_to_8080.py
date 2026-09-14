@@ -10,6 +10,7 @@
 import sys, re, os
 import a8_native_logic
 import a8_native_flip
+import a8_sound_ay
 sys.path.insert(0, __import__('os').path.dirname(__file__))
 
 
@@ -1488,8 +1489,12 @@ def a8_glue(src, target):
     # меню и вырезание вариантов ввода ZX — ОБЕИМ целям (иначе локстеп судил бы чужое меню);
     # ввод через матрицу Вектора и пауза на ВК — только vec
     src = a8_cut_controls(src, vec=(target == 'vec'))
+    # Звук: весь ZX-путь (бипер) -> драйвер MSX на AY. ОБЕИМ целям, чтобы локстеп доказывал,
+    # что драйвер не трогает 1928 Б состояния игры (см. PORT_RECIPE «этап 5, заход 3: звук»).
+    # Идёт ПОСЛЕ склейки: a8_vec.glue переносит адреса, записанные числом, и снимает
+    # out (0xFE) по ИСХОДНОМУ тексту ZX-пути, который звук вырезает целиком.
     if target == 'vec':
-        return a8_vec_glue(src)
+        return a8_sound_ay.apply(a8_vec_glue(src))[0]
     assert target == 'lockstep', target
     # Развёртка (ix+d) в горячих процедурах здесь ВЫКЛЮЧЕНА по умолчанию (темп на этой цели
     # не меряем), но `A8_IX_HOT=1` включает ТОТ ЖЕ список, что у цели vec: иначе гейт локстепа
@@ -1587,7 +1592,7 @@ def a8_glue(src, target):
         src = _stub_after_label(src, lbl, 'lockstep: самомод. цикл, пишет только в буфер/экран')
     src = re.sub(r'^\s*SAVEBIN[^\n]*$',
                  '        SAVEBIN "build/alien8_8080.r0m", 0, 0x10000', src, flags=re.M)
-    return src
+    return a8_sound_ay.apply(src)[0]
 
 
 def main():
@@ -1614,6 +1619,7 @@ def main():
     src = translate(src)
     src = a8_native_logic.apply(src)
     src = a8_native_flip.apply(src)
+    src = a8_sound_ay.emit(src, target)  # ядро драйвера звука — уже в i8080, транслировать нельзя
     helpers = ix_helpers_text()
     if target == 'vec':
         # хелперы — ПОСЛЕ цепочек print_sprite: цепочки обязаны начинаться на границе страницы
