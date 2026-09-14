@@ -71,6 +71,13 @@ if(SYNC<0)throw new Error("не нашёл call init_start_location в лист�
 // указатели: их значения зависят от раскладки памяти, сверять с ZX нельзя (тот же список, что в lockstep_vec.js)
 const PTRS=["tmp_SP","gfxbase_8x8","tmp_objects_to_draw","render_obj_1","render_obj_2","block_type_tbl_base","word_5B34"];
 const IGN=new Set();for(const n of PTRS){const o=L[n]-VARS0;IGN.add(o);IGN.add(o+1);}
+// ЕЩЁ ДВА УКАЗАТЕЛЯ, которых нет в списке lockstep_vec.js: поле +16/+17 каждой из ДВУХ
+// записей special_objs_here. find_special_objs_here кладёт туда адрес записи в
+// special_objs_tbl (`push iy … pop bc : ld a,c : ld (de),a : ld a,b : ld (de),a`), а
+// special_objs_tbl на Векторе лежит по другому адресу. В стартовой комнате специальных
+// объектов нет, поэтому локстеп этого не видел; комнаты 39/88/48 расходились ровно здесь
+// и только здесь (2 байта на запись, 600 итераций из 600).
+for(const o of [16,17,48,49])IGN.add(L.special_objs_here-VARS0+o);
 const names=Object.entries(L).filter(([n,a])=>a>=VARS0&&a<VARS1).sort((x,y)=>x[1]-y[1]);
 const nameOf=off=>{let best="?";for(const [n,a] of names){if(a-VARS0<=off)best=n+"+"+(off-(a-VARS0));}return best;};
 // БИТЫ СОСТОЯНИЯ, КОТОРЫМ РАЗРЕШЕНО ОТЛИЧАТЬСЯ (каждый — с доказательством, а не «на всякий случай»).
@@ -175,6 +182,11 @@ let phase="menu",iter=0,cmp=0,seed3pend=-1;
 memory.write=function(a,w,s){a&=0xffff;
   if(WATCH&&a>=WATCH[0]&&a<=WATCH[1]&&wn++<30)console.log(`WATCH iter ${iter} pc=${cpu.pc.toString(16)} ${a.toString(16)} <- ${w.toString(16)} (was ${memory.read(a,false).toString(16)})`);
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
+  // A8ROOM=<байт>: подменить номер комнаты — ОДИНАКОВО с screendiff_vec.js и с ZXSCR_ROOM
+  // стенда ZX (zx_screen.lua). Номер лежит в поле +8 объектов 0 и 1 и пишется в
+  // init_start_location; retrieve_screen читает его позже.
+  if(process.env.A8ROOM&&phase==="init"&&(a===L.graphic_objs_tbl+8||a===L.graphic_objs_tbl+40)){
+    w=+process.env.A8ROOM;}
   if(a===ROOM&&phase==="init"&&w!==0){phase="game";key("0",false);}
   // ОРАКУЛ СЛУЧАЙНОСТИ: первая запись seed_3 после границы итерации = результат
   // `seed_3 += mem[seed_2] + L + H`, где mem[seed_2] на Векторе физически другой байт.

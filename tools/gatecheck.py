@@ -42,11 +42,13 @@ STAND = os.path.join(os.environ.get('A8_RESEARCH', os.path.expanduser('~/project
 SCEN = [('покой', 'inputs_idle.txt', 'zx_idle600.bin'),
         ('ходьба', 'inputs_alive.txt', 'zx_states600.bin'),
         ('осторожный', 'inputs_safe.txt', 'zx_safe600.bin')]
-# гейт пикселей против ZX: тот же сценарий, но журнал — дамп ЭКРАНА (zx_screen.lua стенда)
-PIXSCEN = [('покой', 'inputs_idle.txt', 'zx_screen_idle.bin'),
-           ('ходьба', 'inputs_alive.txt', 'zx_screen_alive.bin'),
-           ('осторожный', 'inputs_safe.txt', 'zx_screen_safe.bin'),
-           ('прогулка', 'inputs_walk.txt', 'zx_screen_walk.bin')]   # четыре комнаты
+# гейт пикселей против ZX: тот же сценарий, но журнал — дамп ЭКРАНА (zx_screen.lua стенда).
+# Четвёртое поле — номер комнаты (A8ROOM на стенде Вектора = ZXSCR_ROOM у lua), None = стартовая.
+PIXSCEN = [('покой', 'inputs_idle.txt', 'zx_screen_idle.bin', None),
+           ('ходьба', 'inputs_alive.txt', 'zx_screen_alive.bin', None),
+           ('осторожный', 'inputs_safe.txt', 'zx_screen_safe.bin', None),
+           ('прогулка', 'inputs_walk.txt', 'zx_screen_walk.bin', None),   # четыре комнаты
+           ('комната 48', 'inputs_idle.txt', 'zx_screen_r48.bin', '48')]  # тяжёлая комната
 
 MUTS = [
     dict(name="render", gate="render_gate",
@@ -220,15 +222,18 @@ def gate_result(gate, env=None):
         # ГЕЙТ ПИКСЕЛЕЙ ПРОТИВ ZX. Дампы экрана оригинала снимает zx_screen.lua стенда
         # (LOCKSTEP.md §10) — без них спрашивать не с чего, и это НЕ «порча поймана»:
         # гейт падает по отсутствию файла, а не по расхождению.
-        for tag, inp, dump in PIXSCEN:
+        for tag, inp, dump, room in PIXSCEN:
             d = os.path.join(STAND, dump)
             if not os.path.exists(d):
                 return 0, "НЕТ ДАМПА ЭКРАНА %s — снять zx_screen.lua (LOCKSTEP.md §10)" % d
+            e = dict(env or {})
+            if room:
+                e["A8ROOM"] = room
             r = run(["node", "tools/zxpix_vec.js", "build/alien8_vec.r0m", "build/alien8_vec.sld",
-                     "600", os.path.join(STAND, inp), d], env)
+                     "600", os.path.join(STAND, inp), d], e)
             if r.returncode:
                 return r.returncode, (tag + ": ") + (r.stdout + r.stderr)[-300:]
-        return 0, "все три сценария пиксель в пиксель с ZX"
+        return 0, "все сценарии пиксель в пиксель с ZX"
     if gate == "render_gate":
         r = run(["tools/render_gate.sh", "HEAD", "40", "104"], env)
     elif gate == "flipcheck":
