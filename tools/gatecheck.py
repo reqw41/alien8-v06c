@@ -42,6 +42,10 @@ STAND = os.path.join(os.environ.get('A8_RESEARCH', os.path.expanduser('~/project
 SCEN = [('покой', 'inputs_idle.txt', 'zx_idle600.bin'),
         ('ходьба', 'inputs_alive.txt', 'zx_states600.bin'),
         ('осторожный', 'inputs_safe.txt', 'zx_safe600.bin')]
+# гейт пикселей против ZX: тот же сценарий, но журнал — дамп ЭКРАНА (zx_screen.lua стенда)
+PIXSCEN = [('покой', 'inputs_idle.txt', 'zx_screen_idle.bin'),
+           ('ходьба', 'inputs_alive.txt', 'zx_screen_alive.bin'),
+           ('осторожный', 'inputs_safe.txt', 'zx_screen_safe.bin')]
 
 MUTS = [
     dict(name="render", gate="render_gate",
@@ -51,6 +55,24 @@ MUTS = [
              "\t\t\t\tld\t\tl, 32\t\t\t\t; HL = приёмник\n",
          new="us_dst:\t\t\tld\t\th, 0\t\t\t\t; патч: страница экрана\n"
              "\t\t\t\tld\t\tl, 33\t\t\t\t; HL = приёмник\n"),
+    dict(name="zxwipe", gate="zxpix",
+         why="окно стирания старого положения объекта (wipe_next_object) на строку короче — "
+             "ровно тот класс дефекта, на который жалуется владелец («спрайты не стираются»). "
+             "ЧИСТЫЙ ВЫВОД: 1928 байт состояния при этом совпадают с ZX байт в байт, и красным "
+             "гейт делает именно пиксельная сверка (render_gate эту порчу тоже ловит — она "
+             "видна с третьей итерации; здесь она доказывает, что пиксельный путь НЕ вакуумный)",
+         file="tools/a8_native_logic.py",
+         old="\t\tsub c\n\t\tld l, a\t\t\t\t; высота окна\n",
+         new="\t\tsub c\n\t\tdec a\n\t\tld l, a\t\t\t\t; высота окна\n"),
+    dict(name="zxkey", gate="zxpix",
+         why="раскладка 1: клавиша Z («поворот влево») уехала на соседний бит матрицы. "
+             "RENDER_GATE ЭТУ ПОРЧУ НЕ ЛОВИТ (проверено руками: три сценария «СОВПАДЕНИЕ», код 0) — "
+             "его окно 40 итераций, а Z в сценариях нажимается на 60-й; ЛОКСТЕП тоже слеп — путь "
+             "a8_vec_input есть только у цели vec, у цели lockstep стоит оригинальный keyboard: "
+             "по рядам ZX. Гейт против ZX краснеет на итерации 62",
+         file="tools/a8_z80_to_8080.py",
+         old="        DB low (vec_kbmat+7), 0x04, 0x01   ; Z             -> влево\n",
+         new="        DB low (vec_kbmat+7), 0x08, 0x01   ; ПОРЧА: Z уехала на соседний бит\n"),
     dict(name="logic", gate="lockstep",
          why="update_sprite_loop кладёт в «старую» копию +31 (pixel Y) значение поля +26 (pixel X)",
          file="tools/a8_native_logic.py",
@@ -193,6 +215,19 @@ def gate_result(gate, env=None):
     b = build("vec", env)
     if b.returncode:
         return b.returncode, (b.stdout + b.stderr)[-400:]
+    if gate == "zxpix":
+        # ГЕЙТ ПИКСЕЛЕЙ ПРОТИВ ZX. Дампы экрана оригинала снимает zx_screen.lua стенда
+        # (LOCKSTEP.md §10) — без них спрашивать не с чего, и это НЕ «порча поймана»:
+        # гейт падает по отсутствию файла, а не по расхождению.
+        for tag, inp, dump in PIXSCEN:
+            d = os.path.join(STAND, dump)
+            if not os.path.exists(d):
+                return 0, "НЕТ ДАМПА ЭКРАНА %s — снять zx_screen.lua (LOCKSTEP.md §10)" % d
+            r = run(["node", "tools/zxpix_vec.js", "build/alien8_vec.r0m", "build/alien8_vec.sld",
+                     "600", os.path.join(STAND, inp), d], env)
+            if r.returncode:
+                return r.returncode, (tag + ": ") + (r.stdout + r.stderr)[-300:]
+        return 0, "все три сценария пиксель в пиксель с ZX"
     if gate == "render_gate":
         r = run(["tools/render_gate.sh", "HEAD", "40", "104"], env)
     elif gate == "flipcheck":
