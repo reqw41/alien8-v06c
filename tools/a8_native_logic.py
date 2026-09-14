@@ -85,6 +85,19 @@ def presub(src):
     src = _sub(src, r'^        ld b, 56   ; max objects\n',
                "        ld a, (a8_nobj)   ; A8: только занятые записи (было 56)\n        ld b, a\n",
                'счётчики циклов по объектам', count=2)
+    # 2а) четыре цикла «перебрать кандидатов на пересечение» тоже ходят до границы.
+    #     Пустые записи (graphic_no = 0) отсеивает is_object_not_ignored, то есть проход
+    #     по ним ХОЛОСТОЙ: ~200 тактов на запись (хвост шага + вызов + ранний выход).
+    #     Занято 40 из 56 в стартовой, 31 в комнате 48 — четверть-половина проходов даром.
+    #     b = a8_nobj >= 4 всегда (retrieve_screen кладёт объекты начиная со слота 4,
+    #     значит первый свободный слот не ниже 4), поэтому b = 0 и разворот djnz на 256
+    #     проходов невозможны. A в этой точке мёртв во всех четырёх: adj_dX/dY/dZ зовутся
+    #     из adj_for_out_of_bounds после `ld a,c/and a`, и первое же, что делает тело, —
+    #     call is_object_not_ignored, который A перезаписывает; do_any_objs_intersect
+    #     читает A только после того же вызова.
+    src = _sub(src, r'^        ld iy, graphic_objs_tbl\n        ld b, 56\n',
+               "        ld iy, graphic_objs_tbl\n        ld a, (a8_nobj)   ; A8: только занятые записи (было 56)\n        ld b, a\n",
+               'счётчики циклов пересечения', count=4)
     src = _sub(src, r'^        ld bc, a8_vars_end   ; end of table\?\n',
                "        ld bc, (a8_objend)   ; A8: конец ЗАНЯТОЙ части таблицы (было: конец таблицы)\n",
                'конец таблицы в ret_from_tbl_jp')
@@ -96,6 +109,13 @@ _BODIES = [
     ('list_objects_to_draw', 'N_LIST_OBJS'),
     ('set_both_deadly_flags', 'N_DEADLY'),
     ('calc_pixel_XY', 'N_CALC_PIXEL_XY'),
+    ('do_objs_intersect_on_x', 'N_INTERSECT_X'),
+    ('is_object_not_ignored', 'N_NOT_IGNORED'),
+    ('do_objs_intersect_on_z', 'N_INTERSECT_Z'),
+    ('do_objs_intersect_on_y', 'N_INTERSECT_Y'),
+    ('sub_AE03', 'N_SUB_AE03'),
+    ('adj_dY_for_obj_intersect', 'N_ADJ_DY'),
+    ('adj_dZ_for_obj_intersect', 'N_ADJ_DZ'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -104,6 +124,7 @@ _RANGES = [
     ('set_pixel_adj', 'adj_m2_m8', 'N_SET_PIXEL_ADJ'),
     ('upd_02', 'sub_C082', 'N_UPD_02'),
     ('wipe_next_object', 'loc_CF5F', 'N_WIPE'),
+    ('upd_2D', 'upd_48_4B', 'N_UPD_2D'),
 ]
 
 
@@ -1194,4 +1215,526 @@ lo_step:	inc c
 		ld (z80_ix), hl
 		ret
         ; End of function list_objects_to_draw
+"""
+
+
+# ---------------------------------------------------------------------------
+# do_objs_intersect_on_x — 10.9 % тактов комнаты 48 (75.7 вызова, 1099 тактов на вызов).
+# Четыре обращения (ix+4), (iy+4), (ix+1), (iy+1) — четыре компактных хелпера по 260 тактов.
+#
+# Нативно: два указателя записей (по одному за раз в HL), поля — сдвигом младшего байта.
+# (graphic_objs_tbl & 31) = 8, запись 32-байтная => l ≡ 8 (mod 32), l+4 ≤ 236 — переноса
+# нет (ASSERT).
+#
+# ЧТО ДОЛЖНО ДОЙТИ ДО ВЫЗЫВАЮЩЕГО. Все пять вызывателей (do_any_objs_intersect,
+# adj_dX/dY/dZ_for_obj_intersect, is_on_or_near_obj) читают РОВНО перенос (`jr nc`/`jr c`),
+# держа в B счётчик, в C — dX, в L — dY, в H — dZ, в IX — свой объект, в IY — кандидата.
+# Поэтому B, C, H, L, IX, IY обязаны уцелеть, а последней командой стоит тот же `sub`,
+# что и в оригинале, — флаги совпадают побитно. DE оригинал портит (D = сумма ширин),
+# нативная версия его СОХРАНЯЕТ: опереться на порчу нельзя, а восстановление бесплатно
+# (POP rp на i8080 флагов не трогает, поэтому стоит после `sub`).
+# 1099 тактов на вызов -> 209.
+# ---------------------------------------------------------------------------
+N_INTERSECT_X = """do_objs_intersect_on_x:
+		ASSERT (graphic_objs_tbl & 31) <= 27	; иначе l+4 переносит
+		push hl
+		push de
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 4
+		ld l, a				; -> +4 полуширина по X
+		ld d, (hl)
+		dec l
+		dec l
+		dec l				; -> +1 X
+		ld e, (hl)
+		ld hl, (z80_iy)
+		ld a, l
+		add a, 4
+		ld l, a				; -> +4
+		ld a, d
+		add a, (hl)
+		ld d, a				; D = сумма полуширин
+		dec l
+		dec l
+		dec l				; -> +1
+		ld a, e
+		add a, c			; X своего объекта + dX
+		sub (hl)
+		jp p, doi_x1
+		cpl
+		inc a				; neg
+doi_x1:
+		sub d
+		pop de				; POP rp флагов не трогает — перенос от `sub` цел
+		pop hl
+		ret
+        ; End of function do_objs_intersect_on_x
+"""
+
+
+# ---------------------------------------------------------------------------
+# is_object_not_ignored — 9.0 % тактов комнаты 48 (128.7 вызова, 531 такт на вызов).
+# Два обращения (iy+0) и (iy+7) — два компактных хелпера.
+#
+# Оригинал портит ТОЛЬКО A и флаги, поэтому нативной версии хватает push/pop hl:
+# POP rp на i8080 флагов не трогает, и Z от `and a` (ранний выход) и флаги от `and 2`
+# доходят до вызывающего нетронутыми. A в раннем выходе равен нулю и там, и там.
+#
+# Вызыватели — четыре цикла по таблице (do_any_objs_intersect, adj_dX/dY/dZ_for_obj_intersect):
+# все читают только Z (`jr z`), держа B — счётчик, C/L/H — dX/dY/dZ, IX — свой объект,
+# IY — кандидата. Ни один регистр, кроме A, трогать нельзя — HL и восстанавливается.
+# 531 такт на вызов -> 103 (68 в раннем выходе).
+# ---------------------------------------------------------------------------
+N_NOT_IGNORED = """is_object_not_ignored:
+		ASSERT (graphic_objs_tbl & 31) <= 24	; иначе l+7 переносит
+		push hl
+		ld hl, (z80_iy)
+		ld a, (hl)			; +0 graphic_no
+		and a
+		jp z, ino_ret			; было `ret z` — A = 0, Z = 1
+		ld a, l
+		add a, 7
+		ld l, a				; -> +7 flags7
+		ld a, (hl)
+		cpl
+		and 2
+ino_ret:
+		pop hl				; POP rp флагов не трогает
+		ret
+        ; End of function is_object_not_ignored
+"""
+
+
+# ---------------------------------------------------------------------------
+# do_objs_intersect_on_z — 2.6 % тактов комнаты 48 (23.6 вызова, 843 такта на вызов).
+# Ось Z устроена НЕ так, как X и Y: полуглубина берётся у ОДНОГО из объектов, а у кого
+# именно — решает знак разности (ветка `neg` -> (ix+6), иначе (iy+6)). Обе ветки оставлены
+# дословно; полуглубина своего объекта читается заранее в E, кандидата — только в своей ветке.
+#
+# Сохранность — как у do_objs_intersect_on_x: вызыватели читают РОВНО перенос от
+# последнего `sub d`, значит B, C, H, L, IX, IY обязаны уцелеть; DE оригинал портит, а
+# нативная версия сохраняет (POP rp флагов не трогает и стоит после `sub`).
+# 843 такта на вызов -> 236.
+# ---------------------------------------------------------------------------
+N_INTERSECT_Z = """do_objs_intersect_on_z:
+		ASSERT (graphic_objs_tbl & 31) <= 25	; иначе l+6 переносит
+		push hl
+		push de
+		ld d, h				; D = dZ (параметр приходит в H)
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 3
+		ld l, a				; -> +3 Z
+		ld a, (hl)
+		add a, d			; Z своего объекта + dZ
+		ld d, a
+		inc l
+		inc l
+		inc l				; -> +6 полуглубина своего
+		ld e, (hl)
+		ld hl, (z80_iy)
+		ld a, l
+		add a, 3
+		ld l, a				; -> +3
+		ld a, d
+		sub (hl)
+		jp p, doi_z1
+		cpl
+		inc a				; neg -> глубина СВОЕГО объекта
+		ld d, e
+		jp doi_z2
+doi_z1:
+		inc l
+		inc l
+		inc l				; -> +6 полуглубина кандидата
+		ld d, (hl)
+doi_z2:
+		sub d
+		pop de				; POP rp флагов не трогает
+		pop hl
+		ret
+        ; End of function do_objs_intersect_on_z
+"""
+
+
+# ---------------------------------------------------------------------------
+# do_objs_intersect_on_y — 1.4 % тактов комнаты 48 (9.7 вызова, 1096 тактов на вызов).
+# Зеркало оси X: четыре обращения (ix+5), (iy+5), (ix+2), (iy+2). Отличие одно —
+# параметр dY приходит в L, то есть в том самом регистре, который сейчас станет
+# указателем, поэтому снимается ДО загрузки (`ld d, l`).
+# Сохранность и флаги — как у do_objs_intersect_on_x.
+# 1096 тактов на вызов -> 219.
+# ---------------------------------------------------------------------------
+N_INTERSECT_Y = """do_objs_intersect_on_y:
+		ASSERT (graphic_objs_tbl & 31) <= 26	; иначе l+5 переносит
+		push hl
+		push de
+		ld d, l				; D = dY (параметр приходит в L)
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 2
+		ld l, a				; -> +2 Y
+		ld a, (hl)
+		add a, d			; Y своего объекта + dY
+		ld d, a
+		inc l
+		inc l
+		inc l				; -> +5 полувысота своего
+		ld e, (hl)
+		ld hl, (z80_iy)
+		ld a, l
+		add a, 5
+		ld l, a				; -> +5
+		ld a, e
+		add a, (hl)
+		ld e, a				; E = сумма полувысот
+		dec l
+		dec l
+		dec l				; -> +2
+		ld a, d
+		sub (hl)
+		jp p, doi_y1
+		cpl
+		inc a				; neg
+doi_y1:
+		sub e
+		pop de				; POP rp флагов не трогает
+		pop hl
+		ret
+        ; End of function do_objs_intersect_on_y
+"""
+
+
+# ---------------------------------------------------------------------------
+# sub_AE03 — 3.7 % тактов комнаты 48 и 12.9 % комнаты 39 (1.0 вызов, 52 прохода по 440 тактов).
+# Линейный поиск по «прочим» объектам (slot 4 и дальше): первый, у которого
+# (graphic_no - L) < H. Тело прохода — одно обращение (iy+0) компактным хелпером плюс
+# 16-битное `add iy,de` через z80_iy (ещё пять команд с сохранением HL).
+#
+# Нативно указатель живёт в DE и читается как `ld a,(de)`: HL занят обоими параметрами
+# (L — начало диапазона, H — его ширина) и обязан уцелеть — оригинал его не трогает.
+# Шаг 32 — сложением младшего байта с явным `jp nc / inc d` (записи ходят по всей
+# таблице, страница переносится каждые 8 проходов).
+#
+# ЧТО ДОЛЖНО ДОЙТИ ДО ВЫЗЫВАЮЩЕГО. Вызыватель ровно один — upd_60_to_63:
+#   ld hl, 0x470 : call sub_AE03 : jr nc, loc_AFD0 : ld a,(iy+0) ...
+# то есть перенос (нашли/не нашли) и IY (адрес найденной записи). A после возврата
+# перезаписывается сразу, Z и S не читает никто, loc_AFD0 к IY не обращается.
+# Поэтому: найдено — CY от того же `cp h`, что и в оригинале; не найдено — перенос
+# чистится явным `and a` (у Z80 его чистил последний `cp h`, а здесь последним флаги
+# ставит сложение указателя). z80_iy пишется на ОБОИХ выходах, как и в оригинале
+# (на выходе «не найдено» IY = other_objs_here + 52*32, туда же приходит и DE):
+# z80_iy — глобальная переменная порта, и оставлять её протухшей нельзя.
+# XCHG и SHLD флагов на i8080 не трогают, поэтому запись стоит после `and a`.
+# 440 тактов на проход -> 67.
+# ---------------------------------------------------------------------------
+N_SUB_AE03 = """sub_AE03:
+		ld de, other_objs_here
+		ld b, 52
+ae3_lp:
+		ld a, (de)			; +0 graphic_no
+		sub l
+		cp h
+		jp c, ae3_end			; было `ret c` — нашли
+		ld a, e
+		add a, 32			; следующая запись
+		ld e, a
+		jp nc, ae3_nx
+		inc d
+ae3_nx:
+		dec b
+		jp nz, ae3_lp
+		and a				; не нашли: перенос чист (у Z80 его чистил последний `cp h`)
+ae3_end:
+		ex de, hl
+		ld (z80_iy), hl			; XCHG и SHLD флагов не трогают
+		ex de, hl
+		ret
+        ; End of function sub_AE03
+"""
+
+
+# ---------------------------------------------------------------------------
+# upd_2D («обвал блока») — 3.6 % тактов комнаты 39 (8.0 вызовов, 704 такта на вызов),
+# из них 87 % в компактных хелперах: три обращения (ix+13) на чтение, (ix+13) на запись
+# и (ix+0) на запись.
+#
+# Нативно — один указатель в HL. `bit 3` и `res 3` слиты: если бит чист, `res 3` пишет
+# то же самое значение, то есть запись не нужна вовсе, и ранний выход уходит сразу.
+#
+# ЧТО ДОЛЖНО ДОЙТИ ДО ВЫЗЫВАЮЩЕГО. Единственный вход — запись таблицы upd_sprite_jmp_tbl,
+# то есть `jp (hl)` из jump_to_tbl_entry с адресом возврата ret_from_tbl_jp. ret_from_tbl_jp
+# не читает ни A, ни флагов (он заново берёт z80_ix и шагает по таблице), а второй выход
+# `jp upd_30_to_36_40` начинается с `call adj_m4_m12` = `ld hl,0xFCF4 : jr set_pixel_adj` —
+# тоже ни A, ни флагов. Поэтому A (оригинал его не трогал) и флаги от `bit` мертвы.
+# HL всё же сохраняется: после `call upd_1E` там 0xF7F0, и оригинал его не портит.
+# 704 такта на вызов -> 140.
+# ---------------------------------------------------------------------------
+N_UPD_2D = """upd_2D:
+		ASSERT (graphic_objs_tbl & 31) <= 18	; иначе l+13 переносит
+		call upd_1E
+		push hl				; оригинал (bit/res/ld (ix+0),imm) HL не трогает
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 13
+		ld l, a				; -> +13 flags13
+		ld a, (hl)
+		and 8				; было `bit 3`
+		jp z, u2d_ret			; бит чист -> `res 3` ничего не меняет, выход `ret z`
+		ld a, (hl)
+		and 0xF7			; res 3
+		ld (hl), a
+		ld a, l
+		sub 13
+		ld l, a				; -> +0 graphic_no
+		ld (hl), 0x40
+		pop hl
+		jp upd_30_to_36_40
+u2d_ret:
+		pop hl
+		ret
+        ; ---------------------------------------------------------------------------
+"""
+
+
+# ---------------------------------------------------------------------------
+# adj_dY_for_obj_intersect — 2.1 % тактов комнаты 48 (1.9 вызова × 31 запись) плюс
+# бо́льшая часть 1.7 % процедуры is_object_not_ignored, которую этот цикл и зовёт.
+#
+# Переписан ТОЛЬКО СКЕЛЕТ цикла, «попадание» (set 1,(ix+12), перенос битов 6 между
+# (ix+13)/(iy+13), (iy+10) и adj_d_for_out_of_bounds) оставлено дословно тем же кодом,
+# что ставил транслятор: оно срабатывает редко (весь цикл — 213 тактов на запись, то есть
+# почти целиком холостые проходы), а любой компактный хелпер il_* сохраняет DE и BC —
+# проверено по телам il_ix_set/lda/or/sta и il_iy_or/sta/bit: там живут только HL, A и
+# статические ячейки il_tmp/il_tmp2/il_a/il_f.
+#
+# Что изменилось:
+#   * указатель кандидата живёт в DE (`ld a,(de)`), а не в памяти z80_iy: HL занят
+#     параметрами (L = dY, H = dZ), C — dX, B — счётчик, свободна только пара DE;
+#   * шаг записи — сложение младшего байта с явным `jp nc / inc d` вместо
+#     `ld de,32 : add iy,de` через z80_iy (шесть команд и два обращения к памяти);
+#   * is_object_not_ignored ВСТРОЕН: `ld a,(de) : and a` для +0 и `and 2` для +7
+#     (у оригинала `cpl : and 2`, то есть Z = «игнорировать»; здесь тот же смысл читается
+#     как NZ). Возврат из +7 к базе и шаг слиты в одно `add a,25`.
+#
+# ЧТО ДОЛЖНО ДОЙТИ ДО ВЫЗЫВАЮЩЕГО. Вызыватель один — adj_for_out_of_bounds:
+#   call adj_dY_for_obj_intersect : ... : ld (ix+9),c : ld (ix+10),l : ld (ix+11),h
+# то есть C (dX), L (dY) и H (dZ). B и DE у оригинала тоже гибнут, флаги не читает никто
+# (после вызова идёт `ld a,(ix+9)`). A мёртв: тело оригинала начиналось с
+# call is_object_not_ignored, который A перезаписывает.
+#
+# z80_iy пишется ровно там, где оригинал оставляет IY видимым снаружи: перед вызовами
+# do_objs_intersect_* и хелперов il_iy_* (они читают IY) и на выходе из цикла
+# (graphic_objs_tbl + a8_nobj*32 — то же значение, что у оригинала). На раннем выходе
+# `ret z` из «попадания» z80_iy уже показывает на текущего кандидата — как в оригинале.
+# 339 тактов на запись (213 цикла + 126 is_object_not_ignored) -> 63.
+# ---------------------------------------------------------------------------
+N_ADJ_DY = """adj_dY_for_obj_intersect:
+		ASSERT (graphic_objs_tbl & 31) <= 24	; иначе e+7 переносит
+		ld de, graphic_objs_tbl
+		ld a, (a8_nobj)			; только занятые записи
+		ld b, a
+ady_lp:
+		ld a, (de)			; +0 graphic_no — встроенный is_object_not_ignored
+		and a
+		jp z, ady_nx			; пустая запись
+		ld a, e
+		add a, 7
+		ld e, a				; -> +7 flags7
+		ld a, (de)
+		and 2				; бит 1 = «игнорировать» (у оригинала cpl : and 2)
+		jp nz, ady_nx7
+		ld a, e
+		sub 7
+		ld e, a				; обратно на базу записи
+		ex de, hl
+		ld (z80_iy), hl			; IY = кандидат: его читают do_objs_intersect_* и il_iy_*
+		ex de, hl
+		call do_objs_intersect_on_x
+		jp nc, ady_nx
+		call do_objs_intersect_on_z
+		jp nc, ady_nx
+ady_y:
+		call do_objs_intersect_on_y
+		jp nc, ady_nx
+		call il_ix_set
+		db 12, 1<<1
+		call il_ix_lda
+		db 13
+		rrca
+		and 0x40
+		call il_iy_or
+		db 13
+		call il_iy_sta
+		db 13
+		rlca
+		and 0x40
+		call il_ix_or
+		db 13
+		call il_ix_sta
+		db 13
+		call il_iy_bit
+		db 7, 1<<2
+		jp z, ady_h3
+		call il_ix_lda
+		db 10
+		call il_iy_sta
+		db 10
+ady_h3:
+		ld a, l
+		call adj_d_for_out_of_bounds
+		ld l, a
+		ret z				; z80_iy уже показывает на текущего кандидата
+		jp ady_y
+ady_nx7:
+		ld a, e
+		add a, 25			; −7 и сразу +32
+		ld e, a
+		jp nc, ady_st
+		inc d
+		jp ady_st
+ady_nx:
+		ld a, e
+		add a, 32
+		ld e, a
+		jp nc, ady_st
+		inc d
+ady_st:
+		dec b
+		jp nz, ady_lp
+		ex de, hl
+		ld (z80_iy), hl			; IY на выходе = graphic_objs_tbl + a8_nobj*32, как у оригинала
+		ex de, hl
+		ret
+        ; End of function adj_dY_for_obj_intersect
+"""
+
+
+# ---------------------------------------------------------------------------
+# adj_dZ_for_obj_intersect — 1.6 % тактов комнаты 48 (1.0 вызов × 31 запись) плюс
+# оставшаяся доля is_object_not_ignored. Скелет переписан точно так же, как у adj_dY:
+# указатель кандидата в DE, шаг сложением младшего байта, встроенный is_object_not_ignored,
+# «попадание» — дословно тем же кодом транслятора (включая развёрнутый `set 3,(iy+13)`,
+# который сам сохраняет HL через il_tmp2 и DE не трогает).
+#
+# Вызыватель один — adj_for_out_of_bounds (ветка dZ_ok): после возврата читает C/L/H,
+# затем `ld a,(ix+9)`, то есть A и флаги мертвы. A на входе тоже мёртв (`ld a,h : and a`
+# перед вызовом, а тело начиналось с call is_object_not_ignored).
+# ---------------------------------------------------------------------------
+N_ADJ_DZ = """adj_dZ_for_obj_intersect:
+		ASSERT (graphic_objs_tbl & 31) <= 24	; иначе e+7 переносит
+		ld de, graphic_objs_tbl
+		ld a, (a8_nobj)			; только занятые записи
+		ld b, a
+adz_lp:
+		ld a, (de)			; +0 graphic_no — встроенный is_object_not_ignored
+		and a
+		jp z, adz_nx
+		ld a, e
+		add a, 7
+		ld e, a				; -> +7 flags7
+		ld a, (de)
+		and 2				; бит 1 = «игнорировать»
+		jp nz, adz_nx7
+		ld a, e
+		sub 7
+		ld e, a				; обратно на базу записи
+		ex de, hl
+		ld (z80_iy), hl			; IY = кандидат
+		ex de, hl
+		call do_objs_intersect_on_x
+		jp nc, adz_nx
+		call do_objs_intersect_on_y
+		jp nc, adz_nx
+adz_z:
+		call do_objs_intersect_on_z
+		jp nc, adz_nx
+		call il_ix_set
+		db 12, 1<<2
+		call il_ix_lda
+		db 13
+		rrca
+		and 0x40
+		call il_iy_or
+		db 13
+		call il_iy_sta
+		db 13
+		rlca
+		and 0x40
+		call il_ix_or
+		db 13
+		call il_ix_sta
+		db 13
+		call il_ix_bit
+		db 7, 1<<2
+		jp z, adz_h9
+		call il_ix_lda
+		db 0
+		sub 0x10
+		cp 0x20
+		jp nc, adz_h7
+		push af
+		ld (il_tmp2),hl
+		ld hl,(z80_iy)
+		ld a,l
+		add a,(13)&255
+		ld l,a
+		ld a,h
+		adc a,((13)>>8)&255
+		ld h,a
+		ld a,(hl)
+		or 1<<3
+		ld (hl),a
+		ld hl,(il_tmp2)
+		pop af
+adz_h7:
+		call il_ix_lda
+		db 11
+		call il_iy_sta
+		db 11
+		call il_ix_lda
+		db 9
+		and a
+		jp nz, adz_h8
+		call il_iy_lda
+		db 9
+		call il_ix_sta
+		db 9
+adz_h8:
+		call il_ix_lda
+		db 10
+		and a
+		jp nz, adz_h9
+		call il_iy_lda
+		db 10
+		call il_ix_sta
+		db 10
+adz_h9:
+		ld a, h
+		call adj_d_for_out_of_bounds
+		ld h, a
+		ret z				; z80_iy уже показывает на текущего кандидата
+		jp adz_z
+adz_nx7:
+		ld a, e
+		add a, 25			; −7 и сразу +32
+		ld e, a
+		jp nc, adz_st
+		inc d
+		jp adz_st
+adz_nx:
+		ld a, e
+		add a, 32
+		ld e, a
+		jp nc, adz_st
+		inc d
+adz_st:
+		dec b
+		jp nz, adz_lp
+		ex de, hl
+		ld (z80_iy), hl			; IY на выходе = graphic_objs_tbl + a8_nobj*32
+		ex de, hl
+		ret
+        ; End of function adj_dZ_for_obj_intersect
 """
