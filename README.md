@@ -16,7 +16,7 @@
 | 2. журнал состояний оригинала | закрыт | `~/projects/alien8-research/zx-stand/` — три журнала по 600 итераций, каждый повторяется байт в байт в трёх прогонах |
 | 3. рекомпиляция Z80 → i8080 | закрыт | `./build.sh lockstep` + `tools/lockstep_vec.js` — 600 из 600 итераций байт в байт на всех трёх сценариях |
 | 4. склейка Вектора | закрыт | `./build.sh vec` + `tools/shot_vec.js` — меню и стартовая комната рисуются, снимок сходится с оригиналом ZX; `tools/render_gate.sh` — гейт картинки |
-| 5. звук, атрибуты, стековый вывод, HUD, цвет, темп | идёт | темп: 3.6 → **14.9 итер/с** в стартовой (заход 3: game_delay снят, ограничитель темпа, нативные процедуры, стековый вывод, нативный разворот; комната 104 — 23.1, 48 — 3.9); меню и три раскладки управления — как у Городецкого; звук — в ветке, атрибуты, HUD и цвет не начаты |
+| 5. звук, атрибуты, стековый вывод, HUD, цвет, темп | идёт | темп: 3.6 → **14.9 итер/с** в стартовой (заход 3: game_delay снят, ограничитель темпа, нативные процедуры, стековый вывод, нативный разворот; комната 104 — 23.1, 48 — 3.9); меню и три раскладки управления — как у Городецкого; **звук — драйвер MSX-версии на AY** (9 эффектов, 6 мелодий, сверка с моделью поканально: 0 расхождений, сдвиг кадра 0); атрибуты, HUD и цвет не начаты |
 
 ```bash
 ./build.sh zx          # ZX-версия из листинга tcdev + гейт «байт в байт»
@@ -34,6 +34,15 @@ python3 tools/gatecheck.py                                # САМОПРОВЕР
 node tools/profile_vec.js build/alien8_vec.r0m build/alien8_vec.sld 150
 node tools/inputcheck_vec.js build/alien8_vec.r0m build/alien8_vec.sld   # раскладки, меню, пауза
 node tools/kbcheck_vec.js build/alien8_vec.r0m build/alien8_vec.sld      # матрица Вектора -> ряды ZX
+
+# ЗВУК (драйвер MSX-версии на AY): журнал записей AY и поканальная сверка с моделью MSX
+node tools/tunecheck_vec.js build/alien8_vec.r0m build/alien8_vec.sld    # темп всех шести мелодий
+A8TUNETRACE=build/ay.txt node tools/tunecheck_vec.js build/alien8_vec.r0m build/alien8_vec.sld
+python3 tools/aycheck.py build/ay.txt                                    # мелодии поканально
+node tools/aytrace_vec.js build/alien8_vec.r0m build/alien8_vec.sld 300 \
+  ~/projects/alien8-research/zx-stand/inputs_alive.txt > build/ay_game.txt
+python3 tools/aycheck.py build/ay_game.txt                               # эффекты в игре
+A8SFX=1:0:31:0:0 node tools/aytrace_vec.js ... > build/ay_e1.txt         # эффект, которого нет в сценарии
 ```
 
 ## Управление
