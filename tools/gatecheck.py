@@ -45,7 +45,8 @@ SCEN = [('покой', 'inputs_idle.txt', 'zx_idle600.bin'),
 # гейт пикселей против ZX: тот же сценарий, но журнал — дамп ЭКРАНА (zx_screen.lua стенда)
 PIXSCEN = [('покой', 'inputs_idle.txt', 'zx_screen_idle.bin'),
            ('ходьба', 'inputs_alive.txt', 'zx_screen_alive.bin'),
-           ('осторожный', 'inputs_safe.txt', 'zx_screen_safe.bin')]
+           ('осторожный', 'inputs_safe.txt', 'zx_screen_safe.bin'),
+           ('прогулка', 'inputs_walk.txt', 'zx_screen_walk.bin')]   # четыре комнаты
 
 MUTS = [
     dict(name="render", gate="render_gate",
