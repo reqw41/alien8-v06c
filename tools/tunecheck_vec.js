@@ -102,7 +102,8 @@ if (TRF) {
 }
 
 const SENT = 0x0038;   // метка возврата: RST 38h (в игру не попадём — ловим PC)
-let bad = 0;
+const IRQDROP = !!process.env.A8_IRQDROP;
+let bad = 0, lost = 0;
 for (const nm of TUNES) {
   const hdr = L["msx_hdr_" + nm];
   cpu.sp = 0x7F00;
@@ -111,7 +112,11 @@ for (const nm of TUNES) {
   cpu.pc = L.play_audio;
   let frames = 0, frc = 0, tacc = 0, steps = 0;
   while (cpu.pc !== SENT && steps < 5e7) {
-    if (frc >= 59904) { frc -= 59904; frames++; curFrame++; v06c.irq = true; v06c.checkInterrupt(); }
+    // A8_IRQDROP=1 — модель железа: прерывание Вектора не защёлкивается, кадр под di теряется.
+    // Проигрыватель мелодии ждёт кадр через ei/halt и под di не сидит, так что потерь тут быть
+    // не должно вовсе — счётчик lost это и судит.
+    if (frc >= 59904) { frc -= 59904; frames++; curFrame++; if (!cpu.iff) lost++;
+      if (!(IRQDROP && !cpu.iff)) { v06c.irq = true; v06c.checkInterrupt(); } }
     const c = (cpu.instruction(), cpu.vcycles);
     steps++; frc += c; tacc += c;
     if (tacc > 1) { const tn = tacc >> 1; tacc -= tn * 2; timer.Count(tn); }
@@ -125,6 +130,7 @@ for (const nm of TUNES) {
   if (Math.abs(d) > 1) bad++;    // допуск 1 кадр: вход в проигрыватель приходится на середину кадра
 }
 console.log("---");
+console.log(`потеряно кадров (обратный ход на di): ${lost}`);
 if (TRF) { fs.writeFileSync(TRF, trace.join("\n") + "\n"); console.log(`журнал записей AY: ${TRF} (${trace.length} строк)`); }
 console.log(bad ? `РАСХОЖДЕНИЙ ТЕМПА: ${bad} из ${TUNES.length}` : `все ${TUNES.length} мелодии совпали по длительности`);
 process.exit(bad ? 1 : 0);

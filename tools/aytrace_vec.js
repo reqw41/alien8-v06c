@@ -159,15 +159,19 @@ if (!process.env.A8MENU) {
   let guard = 0; while (phase !== "game" && guard++ < 4000) { v06c.oneInterrupt(true); frame++; }
   if (phase !== "game") { console.log("не дошли до комнаты"); process.exit(2); }
 }
-startIter = iter; let frc = 0, tacc = 0, steps = 0;
+startIter = iter; let frc = 0, tacc = 0, steps = 0, lost = 0;
+const IRQDROP = !!process.env.A8_IRQDROP;
 const LIMIT = process.env.A8MENU ? N : N;   // A8MENU: N = кадров, иначе N = итераций
 while (steps < 6e8) {
   if (process.env.A8MENU ? frame >= LIMIT : iter - startIter >= LIMIT) break;
-  if (frc >= 59904) { frc -= 59904; frame++; v06c.irq = true; v06c.checkInterrupt(); }
+  // A8_IRQDROP=1 — модель железа: прерывание Вектора не защёлкивается, кадр под di теряется.
+  if (frc >= 59904) { frc -= 59904; frame++; if (!cpu.iff) lost++;
+    if (!(IRQDROP && !cpu.iff)) { v06c.irq = true; v06c.checkInterrupt(); } }
   const c = (cpu.instruction(), cpu.vcycles);
   steps++; frc += c; tacc += c;
   if (tacc > 1) { const tn = tacc >> 1; tacc -= tn * 2; timer.Count(tn); }
   if (cpu.last_opcode === 0xd3) io.commit();
 }
-console.log("# записей " + nw + ", кадров " + frame + ", итераций " + (iter - startIter));
+console.log("# записей " + nw + ", кадров " + frame + ", итераций " + (iter - startIter)
+  + ", потеряно кадров (обратный ход на di) " + lost);
 process.exit(nw ? 0 : 1);
