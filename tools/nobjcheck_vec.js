@@ -50,6 +50,11 @@ function key(k,down){
 const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync(INPUTS,"utf8").split("\n")){const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+LAG]=inputs[+m[1]+LAG]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
 
 const T=L.graphic_objs_tbl, NB=L.a8_nobj, NOBJ=56, BTB=L.block_type_tbl_base;
+// Границу имеет право ставить РОВНО одно место — голова zero_end_of_graphic_objs_tbl
+// (tools/a8_native_logic.py, _NOBJ_HEAD), от метки до loc_zeg_lp. Любая другая запись в
+// a8_nobj/a8_objend — затёртая посторонним кодом граница, а это ровно тот дефект, на
+// который подумал владелец 2026-09-15 (оказалось — не он, но сторож дешёвый).
+const ZEG=L.zero_end_of_graphic_objs_tbl, ZEGEND=L.loc_zeg_lp, OBJEND=L.a8_objend;
 let loading=false;
 let phase="menu",iter=0,steps=0,bad=0,worst=999,wcase=null,maxlive=-1,sumlive=0,cntlive=0;
 function chk(tag){ let ml=-1;
@@ -63,7 +68,11 @@ memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
   if(process.env.A8ROOM&&phase==="init"&&(a===T+8||a===T+40)){w=+process.env.A8ROOM;}
   if(a===ROOM&&phase==="init"&&w!==0){phase="game";key("0",false);}
-  if(a===SEED2HI&&phase==="game"){iter++;for(const [k,d] of (inputs[iter]||[]))key(k,d);chk("итерация "+iter);}
+  // Глушение проверки записей снимается и на границе итерации: загрузка комнаты целиком
+  // укладывается в одну итерацию, а «залипшее» глушение молча выключило бы гейт навсегда.
+  if(a===SEED2HI&&phase==="game"){loading=false;iter++;for(const [k,d] of (inputs[iter]||[]))key(k,d);chk("итерация "+iter);}
+  if(phase==="game"&&ZEG!==undefined&&(a===NB||a===OBJEND||a===OBJEND+1)&&!(cpu.pc>=ZEG&&cpu.pc<ZEGEND)){
+    bad++;if(bad<6)console.log("ЧУЖОЙ ПИСАТЕЛЬ ГРАНИЦЫ: адрес",a.toString(16),"<=",w.toString(16),"pc",cpu.pc.toString(16),"итерация",iter);}
   // Загрузка комнаты: retrieve_screen раскладывает объекты ПОДРЯД, а границу ставит в самом
   // конце (zero_end_of_graphic_objs_tbl), поэтому во время загрузки записи выше СТАРОЙ границы
   // законны — циклы по объектам в это время не работают. Признак начала загрузки — запись
