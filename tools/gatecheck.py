@@ -48,7 +48,20 @@ PIXSCEN = [('покой', 'inputs_idle.txt', 'zx_screen_idle.bin', None),
            ('ходьба', 'inputs_alive.txt', 'zx_screen_alive.bin', None),
            ('осторожный', 'inputs_safe.txt', 'zx_screen_safe.bin', None),
            ('прогулка', 'inputs_walk.txt', 'zx_screen_walk.bin', None),   # четыре комнаты
-           ('комната 48', 'inputs_idle.txt', 'zx_screen_r48.bin', '48')]  # тяжёлая комната
+           ('комната 48', 'inputs_idle.txt', 'zx_screen_r48.bin', '48'),  # тяжёлая комната
+           # 2026-09-15: гибель ВНЕ стартовой комнаты (прежние сценарии гибли только в ней)
+           # и комната 137 — первая в гейтах с РОБОМЫШЬЮ (upd_5E_5F). Именно на ней нашлись
+           # два дефекта рекомпиляции (журнал, «Робомышь стояла на месте»): гейт сверяет не
+           # только пиксели, но и 1928 байт состояния, и красным стало именно состояние.
+           ('гибель в соседней', 'inputs_death.txt', 'zx_screen_death.bin', None),
+           ('комната 137', 'inputs_idle.txt', 'zx_screen_r137.bin', '137'),
+           ('137 + гибель', 'inputs_death137.txt', 'zx_screen_death137.bin', '137')]
+
+# гейт границы занятых записей: сценарий -> (ввод, комната, итераций)
+NOBJSCEN = [('покой', 'inputs_idle.txt', None, '60'),
+            ('прогулка', 'inputs_walk.txt', None, '600'),
+            ('гибель в соседней', 'inputs_death.txt', None, '600'),
+            ('137 + гибель', 'inputs_death137.txt', '137', '600')]
 
 MUTS = [
     dict(name="render", gate="render_gate",
@@ -171,6 +184,23 @@ MUTS = [
          file="tools/a8_sound_ay.py",
          old="\t\t\t\tcp\t\t7\n\t\t\t\tjp\t\tz, mf_end\n",
          new="\t\t\t\tcp\t\t8\n\t\t\t\tjp\t\tz, mf_end\n"),
+    dict(name="mousetbl", gate="zxpix",
+         why="снята починка адреса таблицы направлений робомыши: обратно `sub_B0E7+0x21` — "
+             "смещение, верное только для длины тела НА Z80. Это и был дефект владельца "
+             "(«враг забился в угол»): мышь читала три байта из хвоста собственного кода и "
+             "получала нулевое направление. КРАСНЕЕТ ТОЛЬКО НА КОМНАТЕ 137 — в стартовой "
+             "комнате и в комнатах 39/48/56/88/104 робомыши нет вовсе, и все прежние "
+             "сценарии гейта эту порчу пропускают",
+         file="tools/a8_native_logic.py",
+         old='               "        ld hl, a8_mouse_dirs   ; A8: тело длиннее оригинала на 3 байта, смещение 0x21 не годится\\n",\n',
+         new='               "        ld hl, sub_B0E7+0x21   ; ПОРЧА: снова смещение длины тела Z80\\n",\n'),
+    dict(name="ixshift", gate="zxpix",
+         why="`sla` по (ix+d) снова роняется в комментарий (как делал транслятор): мышь ходит "
+             "половинным шагом. Сторож «ни одной строки UNHANDLED» при этом обойдён — порча "
+             "подменяет само тело сдвига, а не выключает вставку",
+         file="tools/a8_native_logic.py",
+         old="_SHIFT_BODY = {'sla': ['add a,a'], 'srl': ['or a', 'rra']}",
+         new="_SHIFT_BODY = {'sla': ['nop'], 'srl': ['or a', 'rra']}   # ПОРЧА: sla ничего не сдвигает"),
     dict(name="sfx", gate="aycheck",
          why="период шума эффекта 1 маскируется 0x3F вместо 0x1F: R6 расходится с моделью MSX",
          file="tools/a8_sound_ay.py",
@@ -254,8 +284,18 @@ def gate_result(gate, env=None):
         r = run(["node", "tools/flipcheck_vec.js", "build/alien8_vec.r0m",
                  "build/alien8_vec.sld"], env)
     elif gate == "nobjcheck":
-        r = run(["node", "tools/nobjcheck_vec.js", "build/alien8_vec.r0m",
-                 "build/alien8_vec.sld", "60"], env)
+        # Инвариант границы проверяется на ЧЕТЫРЁХ сценариях, а не в одной стартовой комнате:
+        # смена комнаты (прогулка), ГИБЕЛЬ вне стартовой комнаты (сброс состояния и повторный
+        # вход) и комната 137 с робомышью. Первый покрасневший — вердикт.
+        for tag, inp, room, iters in NOBJSCEN:
+            e = dict(env or {})
+            if room:
+                e["A8ROOM"] = room
+            r = run(["node", "tools/nobjcheck_vec.js", "build/alien8_vec.r0m",
+                     "build/alien8_vec.sld", iters, os.path.join(STAND, inp)], e)
+            if r.returncode:
+                return r.returncode, (tag + ": ") + (r.stdout + r.stderr)[-300:]
+        return 0, "граница цела на всех сценариях"
     elif gate == "inputcheck":
         r = run(["node", "tools/inputcheck_vec.js", "build/alien8_vec.r0m",
                  "build/alien8_vec.sld"], env)
