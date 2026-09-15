@@ -1071,6 +1071,19 @@ __A8_VW_CHAIN__
 				ret
 vw_sp:			DS		2					; стек игры на время захвата SP
 
+; ---- дождаться, пока палитру заберёт НАСТОЯЩИЙ ISR (обратный ход) ----
+; vec_set_pal только пишет vec_pal и ставит vec_palreq; записи 15..8 ISR грузит каждый кадр,
+; то есть новый цвет встаёт в БЛИЖАЙШЕМ обратном ходе — до него может пройти почти кадр.
+; Если за это время успеет начаться update_screen, первые столбцы новой комнаты выйдут ещё в
+; старом цвете. Поэтому между colour_something и update_screen ждём кадр: экран в этот момент
+; уже чёрный (vec_wipe0), ждать на чёрном нечего портить. Цена — меньше кадра на смену комнаты.
+vec_palwait:	ei
+vpw:			ld		a, (vec_palreq)
+				or		a
+				ret		z
+				halt						; обратный ход заберёт палитру и сбросит запрос
+				jp		vpw
+
 ; ---- read_key: A = маска рядов ZX -> A = cpl(AND рядов) and 0x1F, как в оригинале ----
 ; Ряды ZX готовит ISR (vec_zxbuild) раз в кадр, ответы для живых масок посчитаны вперёд
 ; (vec_rpbuild): чтение таблицы 70 тактов против ~500 у общего цикла.
@@ -1225,6 +1238,15 @@ def glue(src):
                "        call loc_CE60   ; Вектор: СНАЧАЛА погасить экран,\n"
                "        jp clr_attr     ; и только потом палитра (крючок в fill_attr)\n",
                'clear_scrn: порядок')
+    # ---- заливка атрибутов ZX = палитра Вектора ----
+    # Единственные места, где оригинал красит ВЕСЬ экран: clr_attr (0x42, clear_scrn и экран
+    # «RE-PROGRAMMING») и fill_attr из colour_something (цвет комнаты). Ровно они и обязаны
+    # менять палитру — тогда цвет встаёт там же, где на ZX, без отдельных крючков по местам.
+    src = _sub(src, r'^fill_attr:\n        ld e, a\n',
+               "fill_attr:\n        ld e, a\n"
+               "        call vec_set_pal   ; Вектор: заливка атрибутов = смена палитры (A = атрибут)\n",
+               'fill_attr: палитра')
+
     # ---------------- ЭКРАН: старые процедуры долой ----------------
     src = _sub(src, r'^calc_screen_buffer_addr:\n.*?; End of function calc_screen_buffer_addr\n', "",
                'старый calc_screen_buffer_addr', flags=re.M|re.S)
@@ -1370,10 +1392,12 @@ def hooks(src):
     # Поэтому перед colour_something гасим плоскость 0 (тот же vec_wipe0, что и в clear_scrn),
     # а после — ждём обратного хода, чтобы новый цвет встал ДО первого столбца update_screen.
     # Порядок ZX сохранён: цвет комнаты меняется в colour_something, картинка выходит после.
-    src = _sub(src, r'^loc_A724:\n        xor a\n        ld \(render_status_info\), a\n        call update_screen\n',
-               "loc_A724:\n        xor a\n        ld (render_status_info), a\n        call update_screen\n"
-               "        ld a, (curr_room_attrib)   ; палитра комнаты — вместе с картинкой\n"
-               "        call vec_set_pal\n", 'палитра комнаты')
+    src = _sub(src, r'^        call display_panel\n        call colour_something\n',
+               "        call display_panel\n"
+               "        call vec_wipe0   ; Вектор: экран в ноль ДО смены палитры\n"
+               "        call colour_something   ; fill_attr -> палитра новой комнаты\n"
+               "        call vec_palwait   ; палитра встаёт на ЧЁРНОМ экране, до update_screen\n",
+               'стирание перед сменой цвета')
     src = _sub(src, r'^do_menu_selection:\n',
                "do_menu_selection:\n        ld a, 7   ; меню белое\n        call vec_set_pal\n"
                "        ld a, 0xC0   ; ФОН ПОЛОСЫ ПОДСВЕТКИ — синий. Индексы 8..11 = p0=1, p1=0:\n"
