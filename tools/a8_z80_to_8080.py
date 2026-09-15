@@ -1460,7 +1460,7 @@ def a8_pace(src):
 _DIB_BLOCK = re.compile(r'(?m)^;__DIB_BEG__\n.*?^;__DIB_END__\n', re.S)
 _CU_BLOCK = re.compile(r'(?m)^;__CU_BEG__\n.*?^;__CU_END__\n', re.S)
 _EI_BLOCK = re.compile(r'(?m)^;__EI_BEG__\n.*?^;__EI_END__\n', re.S)
-_DIB_N, _CU_N, _EI_N = 10, 5, 4
+_DIB_N, _CU_N, _EI_N = 10, 6, 5   # догон/ei: +1 на vec_wipe0 (стирание плоскости 0)
 
 
 def _unmark(rx, src, n_want, name):
