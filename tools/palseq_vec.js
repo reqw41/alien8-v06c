@@ -12,10 +12,12 @@
 // появляется в старом и цвет догоняет её через два кадра. На ZX этого нет: там clear_scrn гасит
 // пиксели, а атрибуты (colour_something) ложатся на чёрный экран до update_screen.
 //
-// КРИТЕРИЙ (нарушение = кадр, в котором):
-//   1) записи палитры 8..15 (цвет комнаты: индекс 8..15 = точка в плоскости 0 есть) отличаются
-//      от прошлого кадра, И
+// КРИТЕРИЙ (нарушение = запись палитры, в момент которой):
+//   1) меняется значение записи 8..15 (цвет комнаты: индекс 8..15 = точка в плоскости 0 есть), И
 //   2) плоскость 0 в окне строк 32..223 всех 32 столбцов НЕ ПУСТА (есть ненулевой байт).
+// Срез плоскости 0 берётся ИМЕННО В МОМЕНТ ЗАПИСИ (внутри ISR), а не на границе кадра: палитру
+// пишет обратный ход в начале кадра, и столбцы, выведенные update_screen ПОСЛЕ смены цвета,
+// в срез попадать не должны — иначе правильный порядок читается как нарушение.
 // ИСКЛЮЧЕНИЕ (одно, доказанное исходником ZX): перекраска ТОЙ ЖЕ комнаты. На пути «собран
 // кусок головоломки» (src/alien8_zx.asm, loc_AFF8: мигание атрибутами -> curr_room_attrib := 7 ->
 // colour_something) оригинал МЕНЯЕТ ЦВЕТ КОМНАТЫ, НЕ СТИРАЯ ЭКРАН, — это эффект, а не дефект.
@@ -71,8 +73,30 @@ const memory=new ctx.Memory(),keyboard=new ctx.Keyboard(),timer=new ctx.I8253(),
 // как её делает ISR порта (§4.17 рецепта): индекс = последняя запись 0x02, значение = запись 0x0C.
 const PAL=new Uint8Array(16);
 let palIdx=0, palWrites=0;
+// СРЕЗ ЭКРАНА БЕРЁТСЯ В МОМЕНТ ЗАПИСИ ПАЛИТРЫ, а не на границе кадра. Разница существенна:
+// палитру пишет ISR в обратном ходе, в начале кадра, и если мерить на его конце, то в срез
+// попадут столбцы, которые update_screen вывел ПОСЛЕ смены цвета, — и правильная
+// последовательность «стёр -> перекрасил -> вывел» читалась бы как нарушение.
+const S={fr:0,room:-1,shown:-1,attrChg:false,tag:"",iter:0,seen:-1,bad:0,exc:0,badL:[],excL:[],mark:""};
 { const _out=io.output.bind(io);
-  io.output=(p,w)=>{p&=0xFF;if(p===0x02)palIdx=w&0x0F;else if(p===0x0C){PAL[palIdx]=w&0xFF;palWrites++;}return _out(p,w);}; }
+  io.output=(p,w)=>{p&=0xFF;
+    if(p===0x02)palIdx=w&0x0F;
+    else if(p===0x0C){w&=0xFF;
+      if(palIdx>=8&&PAL[palIdx]!==w&&S.fr!==S.seen&&S.room>=0){   // цвет комнаты РЕАЛЬНО сменился
+        S.seen=S.fr; const nz=plane0nz();
+        if(nz>0){
+          if(S.room===S.shown&&S.attrChg){S.exc++;      // перекраска той же комнаты (light-year)
+            S.mark="ПЕРЕКРАСКА ТОЙ ЖЕ КОМНАТЫ (light-year, законно)";
+            S.excL.push(`${S.tag}: кадр ${S.fr}, итерация ${S.iter}, комната ${S.room}, байт ${nz}`);}
+          else{S.bad++;
+            S.mark="НАРУШЕНИЕ: палитра сменилась на НЕПУСТОМ экране";
+            S.badL.push(`${S.tag}: кадр ${S.fr}, итерация ${S.iter}, комната ${S.room} (на экране ${S.shown}), `+
+                        `непустых байт ${nz}, запись ${palIdx} ${PAL[palIdx].toString(16)} -> ${w.toString(16)}`);}
+        }
+        S.attrChg=false;
+      }
+      PAL[palIdx]=w;palWrites++;}
+    return _out(p,w);}; }
 const cpu=new ctx.I8080(memory,io),tape={advance:()=>{},sample:0,reset:()=>{}},v06c=new ctx.Vector06c(cpu,memory,io,ay,tape);
 v06c.bmp=new Uint32Array(576*288);v06c.displayFrame=()=>{};v06c.check_breakpoint=()=>false;v06c.dbg=null;
 const IMG=new Uint8Array(fs.readFileSync(ROM)).subarray(0,0x10000);
@@ -88,7 +112,7 @@ function plane0nz(){let n=0;
   return n;}
 const palStr=()=>{let s="";for(let i=15;i>=8;i--)s+=PAL[i].toString(16).padStart(2,"0");return s;};
 
-const res={rooms:0,deaths:0,frames:0,bad:[],excs:[],scen:[]};
+const res={rooms:0,deaths:0,frames:0,scen:[]};
 
 function run(inputsFile,tag){
   memory.init_from_array(IMG,0);memory.detach_boot&&memory.detach_boot();
@@ -106,11 +130,11 @@ function run(inputsFile,tag){
   const inputs={};
   if(inputsFile&&fs.existsSync(inputsFile))for(const l of fs.readFileSync(inputsFile,"utf8").split("\n")){
     const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+LAG]=inputs[+m[1]+LAG]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
-  let phase="menu",iter=0,attrChg=false;
+  let phase="menu",iter=0;
   memory.write=function(a,w,s){a&=0xffff;
     if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
     if(a===ROOMATTR&&phase==="init"&&w!==0){phase="game";key("0",false);}
-    if(a===ROOMATTR&&phase==="game"&&w!==rd(a))attrChg=true;   // сменился цвет комнаты (в т.ч. light-year)
+    if(a===ROOMATTR&&phase==="game"&&w!==rd(a))S.attrChg=true;   // сменился цвет комнаты (в т.ч. light-year)
     if(a===SEED2HI&&phase==="game"){iter++;for(const [k,d] of (inputs[iter]||[]))key(k,d);}
     return ow(a,w,s);};
   for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
@@ -119,28 +143,19 @@ function run(inputsFile,tag){
 
   const start=iter; let steps=0,frc=0,tacc=0,fr=0;
   let ev=0, prevPal=palStr(), room=rd(OBJ+8), shownRoom=room, roomChg=0, deaths=0;
-  let lastChgFr=0, log=[], bad=0, exc=0;   // окно трассы: с нулевого кадра (вход в первую комнату)
+  let lastChgFr=0, log=[];   // окно трассы: с нулевого кадра (вход в первую комнату)
+  S.tag=tag;S.fr=0;S.room=room;S.shown=room;S.iter=iter;S.seen=-1;S.attrChg=false;
+  const bad0=S.bad, exc0=S.exc;
   const flush=()=>{if(TRACE&&log.length){for(const s of log)console.log(s);log=[];}};
   while(iter-start<N&&steps<6e8){
-    if(frc>=59904){frc-=59904;fr++;
+    if(frc>=59904){frc-=59904;fr++;S.fr=fr;S.iter=iter;
       if(!(IRQDROP&&!cpu.iff)){v06c.irq=true;v06c.checkInterrupt();}
-      // ---- срез кадра ----
+      // ---- срез кадра (для трассы; вердикт выносится в момент записи палитры) ----
       const p=palStr(), nz=plane0nz(), r=rd(OBJ+8);
-      if(r!==room){room=r;roomChg++;lastChgFr=fr;}
+      if(r!==room){room=r;S.room=r;roomChg++;lastChgFr=fr;}
       const chg=(p!==prevPal);
-      let mark="";
-      if(chg){
-        if(nz>0){
-          // перекраска той же комнаты (light-year): картинка на экране — ТЕКУЩЕЙ комнаты,
-          // а curr_room_attrib поменялся сам. Оригинал ZX делает ровно это (loc_AFF8).
-          if(room===shownRoom&&attrChg){mark="ПЕРЕКРАСКА ТОЙ ЖЕ КОМНАТЫ (light-year, законно)";exc++;
-            res.excs.push(`${tag}: кадр ${fr}, итерация ${iter}, комната ${room}, ${prevPal}->${p}`);}
-          else{mark="НАРУШЕНИЕ: палитра сменилась на НЕПУСТОМ экране";bad++;
-            res.bad.push(`${tag}: кадр ${fr}, итерация ${iter}, комната ${room} (на экране ${shownRoom}), `+
-                         `непустых байт ${nz}, палитра ${prevPal} -> ${p}`);}
-        } else mark="палитра на ЧЁРНОМ экране — законно";
-        attrChg=false;
-      }
+      const mark=chg?(S.mark||"палитра на ЧЁРНОМ экране — законно"):"";
+      S.mark="";
       if(TRACE){
         // окно вокруг смены комнаты: печатаем только кадры С СОБЫТИЕМ (вызов процедуры вывода
         // или смена палитры) — между ними кадр в кадр одно и то же, и список не читается
@@ -151,8 +166,8 @@ function run(inputsFile,tag){
           ` [${evs.join("")||"-"}] ${mark}`);
         if(log.length>400)flush();
       }
-      if(ev&(1<<3))shownRoom=room;     // update_screen дошёл до ret: на экране картинка этой комнаты
-      if(ev&(1<<3))attrChg=false;
+      if(ev&(1<<3)){shownRoom=room;S.shown=room;S.attrChg=false;}   // update_screen дошёл до ret:
+                                    // на экране картинка ЭТОЙ комнаты и в цвете, который стоит сейчас
       prevPal=p; ev=0; res.frames++;
     }
     const w=WPC[cpu.pc]; if(w){ev|=1<<w;if(w===7){deaths++;lastChgFr=fr;}}   // гибель тоже открывает окно трассы
@@ -161,23 +176,23 @@ function run(inputsFile,tag){
     if(cpu.last_opcode===0xd3)io.commit();
   }
   flush();
-  res.rooms+=roomChg;res.deaths+=deaths;
+  res.rooms+=roomChg;res.deaths+=deaths;res.frames+=0;
   res.scen.push(`${tag}: итераций ${iter-start}, кадров ${fr}, смен комнаты ${roomChg}, гибелей ${deaths}, `+
-                `нарушений ${bad}, законных перекрасок ${exc}`);
+                `нарушений ${S.bad-bad0}, законных перекрасок ${S.exc-exc0}`);
 }
 
 for(const s of SCEN)run(s,s.replace(/.*\//,"").replace(/^inputs_/,"").replace(/\.txt$/,""));
 
 console.log(`палитра: записей порта 0x0C ${palWrites}, кадров ${res.frames}`);
 for(const s of res.scen)console.log("  "+s);
-if(res.excs.length){console.log(`законных перекрасок той же комнаты: ${res.excs.length}`);
-  for(const s of res.excs.slice(0,10))console.log("  "+s);}
+if(S.excL.length){console.log(`законных перекрасок той же комнаты (light-year): ${S.excL.length}`);
+  for(const s of S.excL.slice(0,10))console.log("  "+s);}
 if(res.rooms<3||res.deaths<1){
   console.log(`ПУСТАЯ ВЫБОРКА: смен комнаты ${res.rooms} (нужно >= 3), гибелей ${res.deaths} (нужно >= 1)`);
   process.exit(1);}
-if(res.bad.length){
-  console.log(`КРАСНЫЙ: палитра сменилась при непустом экране в ${res.bad.length} кадрах`);
-  for(const s of res.bad.slice(0,20))console.log("  "+s);
+if(S.badL.length){
+  console.log(`КРАСНЫЙ: палитра сменилась при непустом экране в ${S.badL.length} кадрах`);
+  for(const s of S.badL.slice(0,20))console.log("  "+s);
   process.exit(1);}
 console.log(`ЗЕЛЁНЫЙ: ${res.frames} кадров, ${res.rooms} смен комнаты, ${res.deaths} гибелей — `+
             `каждая запись палитры пришлась на пустую плоскость 0`);

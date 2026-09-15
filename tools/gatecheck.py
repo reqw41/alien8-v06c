@@ -152,6 +152,20 @@ MUTS = [
          file="tools/a8_native_flip.py",
          old="        and 0xC0\n        ret z   ; быстрый путь: ориентация уже нужная\n",
          new="        and 0x80\n        ret z   ; быстрый путь: ориентация уже нужная\n"),
+    dict(name="palseq", gate="palseq",
+         why="палитра комнаты встаёт ДО стирания экрана (colour_something + vec_palwait перенесены "
+             "перед vec_wipe0): старая комната успевает вспыхнуть цветом новой — ровно то, на что "
+             "жалуется владелец. ПРОВЕРЕНО РУКАМИ: ни гейт пикселей против ZX (599 итераций "
+             "прогулки «пиксель в пиксель»), ни render_gate (семь сценариев «СОВПАДЕНИЕ»), ни "
+             "локстеп (крючков Вектора у цели lockstep нет вовсе) этой порчи не видят — палитра "
+             "не пиксель, а на границе итерации и картинка, и цвет одни и те же",
+         file="tools/a8_vec.py",
+         old='               "        call vec_wipe0   ; Вектор: экран в ноль ДО смены палитры\\n"\n'
+             '               "        call colour_something   ; fill_attr -> палитра новой комнаты\\n"\n'
+             '               "        call vec_palwait   ; палитра встаёт на ЧЁРНОМ экране, до update_screen\\n",\n',
+         new='               "        call colour_something   ; ПОРЧА: палитра до стирания\\n"\n'
+             '               "        call vec_palwait\\n"\n'
+             '               "        call vec_wipe0\\n",\n'),
     dict(name="tune", gate="tunecheck",
          why="команда END потока нот не распознаётся (cp 7 -> cp 8): мелодия не кончается",
          file="tools/a8_sound_ay.py",
@@ -257,6 +271,12 @@ def gate_result(gate, env=None):
                  "build/alien8_vec.sld", "60"], e)
         open(os.path.join(ROOT, "build", "ay_gatecheck.txt"), "w", encoding="utf-8").write(t.stdout)
         r = run(["python3", "tools/aycheck.py", "build/ay_gatecheck.txt"], env)
+    elif gate == "palseq":
+        # ПАЛИТРА ПРОТИВ СТИРАНИЯ ЭКРАНА: A8_IRQDROP=1 обязателен — без модели «прерывание не
+        # защёлкивается» кадры под di не теряются, и момент загрузки палитры сдвигается
+        e = dict(env or {}); e["A8_IRQDROP"] = "1"
+        r = run(["node", "tools/palseq_vec.js", "build/alien8_vec.r0m",
+                 "build/alien8_vec.sld", "250"], e)
     elif gate == "kbcheck":
         # эталон tools/kbref.txt лежит В РЕПОЗИТОРИИ: без него гейт сверял бы таблицу
         # готовых ответов read_key саму с собой и любую правку vec_zxmap пропускал (§22 KL)
