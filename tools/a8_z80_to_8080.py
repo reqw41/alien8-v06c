@@ -135,7 +135,7 @@ def expand(mn, ops, idxinfo):
         return _bit(ops[0], ops[1])
     if mn in ('res', 'set'):
         return _resset(mn, ops[0], ops[1])
-    if mn in ('sla', 'sra', 'srl', 'sll', 'rl', 'rr', 'rlc', 'rrc'):
+    if mn in _SHIFTS:
         return _shift(mn, ops[0])
     # --- ED block / 16-bit / misc ---
     if mn == 'ldir':
@@ -415,7 +415,27 @@ def _shift_body(op):
         return ["or a", "rra"]
     if op == 'sra':
         return ["ld (il_tmp),a", "add a,a", "ld a,(il_tmp)", "rra"]
-    return [f"; UNHANDLED SHIFT {op}"]
+    raise AssertionError('транслятор не знает сдвига %r' % op)
+
+
+# Сдвиги группы CB. Один список на все формы: регистр (_shift), (hl) (_shift) и ЯЧЕЙКА
+# (ix+d)/(iy+d) (_shift_cell). Раньше формы по (ix+d) не разбирались вовсе — см. _shift_cell.
+_SHIFTS = ('sla', 'sra', 'srl', 'sll', 'rl', 'rr', 'rlc', 'rrc')
+
+
+def _shift_cell(op):
+    """Сдвиг ЯЧЕЙКИ, на которую УЖЕ показывает HL; A сохранён в il_a, старый HL — в il_tmp2.
+
+    Контракт ровно как у Z80 `sla/srl/... (ix+d)`: сдвигается ячейка, A НЕ МЕНЯЕТСЯ,
+    флаги — от результата сдвига. Восстановление A и HL флагов не трогает: на i8080
+    `ld (hl),a` (MOV M,A), `ld a,(nn)` (LDA) и `ld hl,(nn)` (LHLD) флагов не меняют,
+    поэтому S/Z/P/CY, выставленные телом сдвига, доживают до вызывателя.
+
+    Единственное отличие от Z80 — у `srl`/`sra` (тело `or a : rra`): перенос верный,
+    а S/Z/P остаются от ДО-сдвигового значения. То же самое транслятор делает и для
+    регистровых форм (_shift), то есть отличие не новое и не специфичное для (ix+d).
+    """
+    return ["ld a,(hl)"] + _shift_body(op) + ["ld (hl),a", "ld a,(il_a)", "ld hl,(il_tmp2)"]
 
 
 def _shift(op, reg):
@@ -581,7 +601,7 @@ def _ixiy(mn, ops, idxinfo):
         if '(ix' in o.lower() or '(iy' in o.lower():
             midx = i
     if midx is None:
-        return [f"; UNHANDLED IX/IY {full}"]
+        raise AssertionError('транслятор не разбирает форму IX/IY: %s' % full)
     inner = ops[midx]
     disp = re.sub(r'^\((ix|iy)', '', inner, flags=re.I)[:-1]   # strip "(ix" and ")"
     addr = _idx_addr(cell, disp)
@@ -645,7 +665,20 @@ def _ixiy(mn, ops, idxinfo):
                'and': 'and ', 'xor': 'xor ', 'or': 'or ', 'cp': 'cp '}[mn]
         return ["ld (il_a),a", "ld (il_tmp2),hl"] + addr + ["ld a,(il_a)",
                 f"{alu}(hl)", "ld hl,(il_tmp2)"]
-    return [f"; UNHANDLED IX/IY {full}"]
+    if mn in _SHIFTS:
+        # sla/srl/sra/sll/rl/rr/rlc/rrc по (ix+d). ДО 2026-09-15 эта ветка отсутствовала:
+        # форма уходила в последний `return` — строку `; UNHANDLED IX/IY ...`, то есть
+        # в КОММЕНТАРИЙ. Команда молча не попадала в образ, и ни один гейт этого не видел
+        # (check_i8080 смотрит опкоды, а не комментарии). В Alien 8 так потерялись шесть
+        # команд, все в поведении робомыши (`sla (ix+9)`/`sla (ix+10)` в upd_5E_5F и
+        # upd_56_57, `sla (ix+6)`/`srl (ix+6)` в sub_B1FA/sub_B20B): мышь ходила половинным
+        # шагом, а её объект-тень upd_0B при нулевых полях +9/+10/+11 переставал ставить
+        # флаги стирания и отрисовки — «враг забился в угол, на экране мусор» (журнал,
+        # «Дефект владельца 2026-09-15: робомышь стояла на месте»).
+        # Ниже по файлу для тех же форм есть и компактный хелпер (`il_ix_sla` и т. п.) —
+        # тело у обоих путей ОДНО, _shift_cell.
+        return ["ld (il_a),a", "ld (il_tmp2),hl"] + addr + _shift_cell(mn)
+    raise AssertionError('транслятор не разбирает форму IX/IY: %s' % full)
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +730,8 @@ def _ix_form(mn, ops, idxinfo):
             return (px, 'ld' + r) if r in ('a', 'b', 'c', 'd', 'e', 'h', 'l') else None
         sl = ops[1].strip().lower()
         return (px, 'st' + sl) if sl in ('a', 'b', 'c', 'd', 'e', 'h', 'l') else (px, 'stn')
-    if mn in ('inc', 'dec', 'bit', 'res', 'set', 'add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
+    if mn in ('inc', 'dec', 'bit', 'res', 'set', 'add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp') \
+            or mn in _SHIFTS:
         return (px, mn)
     return None
 
@@ -774,6 +808,8 @@ def _ixiy_compact(mn, ops, idxinfo):
         return use('set', f"1<<{ops[0]}")
     if mn in ('add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
         return use(mn)
+    if mn in _SHIFTS:
+        return use(mn)
     return _ixiy(mn, ops, idxinfo)
 
 _ADDR = ["ld hl,({C})", "add a,l", "ld l,a", "ld a,h", "adc a,0", "ld h,a"]   # HL = cell + A
@@ -815,6 +851,10 @@ def _ix_helper(px, form):
         body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "and (hl)", "ld (hl),a"] + _EPI_AF
     elif form == 'set':
         body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "or (hl)", "ld (hl),a"] + _EPI_AF
+    elif form in _SHIFTS:
+        # сдвиг ЯЧЕЙКИ (ix+d): _PRO_A уже сохранил A в il_a и HL в il_tmp2, тело — общее
+        # с встроенной развёрткой (_shift_cell): A и HL сохраняются, флаги — от результата
+        body = _PRO_A + A + _shift_cell(form) + ["ret"]
     elif form in ('add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
         alu = {'add': 'add a,', 'adc': 'adc a,', 'sub': 'sub ', 'sbc': 'sbc a,', 'and': 'and ', 'xor': 'xor ', 'or': 'or ', 'cp': 'cp '}[form]
         body = _PRO_A + A + ["ld a,(il_a)", f"{alu}(hl)", "ld hl,(il_tmp2)", "ret"]
@@ -1735,6 +1775,16 @@ def a8_glue(src, target):
     # zero_DE заливал нулями всё от DE до 0x5C08, то есть ПРЯМО ПО НАШЕМУ КОДУ
     # (симптом: через ~20 кадров после входа в комнату PC уходит в середину
     # инструкции loc_AEF7+1). Замены обязаны быть символическими.
+    # Отдельно — таблица направлений робомыши. Она лежит СРАЗУ ЗА телом sub_B0E7, и оригинал
+    # адресует её числом 0xB108 = sub_B0E7 + 0x21, где 0x21 — ДЛИНА ТЕЛА НА Z80. После
+    # рекомпиляции тело длиннее (три обращения (ix+d) стали `call+db` — 4 байта вместо 3),
+    # и «метка + смещение» показывала бы в ХВОСТ СОБСТВЕННОГО КОДА процедуры: мышь получала
+    # нулевое направление и стояла на месте (журнал, «Дефект владельца 2026-09-15»).
+    # Поэтому у таблицы своя метка, а смещения нет вовсе.
+    old = "        DB 0xFF, 0, 1, 0, 0, 1, 0, 0xFF\n"
+    assert src.count(old) == 1, 'таблица направлений робомыши'
+    src = src.replace(old, "a8_mouse_dirs:   ; таблица направлений sub_B0E7 (была 0xB108 = sub_B0E7+0x21)\n"
+                      + old, 1)
     for num, sym, cnt in (('0x5C08', 'other_objs_here', 2),   # конец таблицы спецобъектов
                           ('0x5B36', 'unk_5B36', 1),
                           ('0x5B3A', 'unk_5B3A', 2),
@@ -1742,7 +1792,7 @@ def a8_glue(src, target):
                           ('0x5B41', 'byte_5B41', 1),
                           ('0x7827', 'sprite_tbl', 1),
                           ('0xB6AD', 'byte_B6A9+4', 1),       # таблица параметров звука
-                          ('0xB108', 'sub_B0E7+0x21', 1)):    # таблица дельт upd_74_to_77
+                          ('0xB108', 'a8_mouse_dirs', 1)):    # направления робомыши, см. выше
         pat = re.compile(r'(?m)^(        ld (?:hl|de|bc|iy|ix), )' + num + r'\b')
         src, n = pat.subn(lambda m: m.group(1) + sym, src)
         assert n == cnt, (num, n, cnt)
@@ -1812,6 +1862,12 @@ def main():
         src, n = re.subn(r'(^        ORG 0x[0-9A-Fa-f]+\nvidbuf:)', lambda m: helpers + m.group(1),
                          src, count=1, flags=re.M)
         assert n == 1, 'место для IX-хелперов'
+    # СТОРОЖ против целого класса дефектов: команда, которую транслятор не разобрал, не имеет
+    # права уехать в КОММЕНТАРИЙ — она просто не попадёт в образ, и ни один гейт этого
+    # не увидит (так шесть `sla`/`srl` по (ix+d) молча пропали, см. журнал 2026-09-15).
+    # Сами ветки транслятора теперь падают ассертом; это — последняя проверка по тексту.
+    assert 'UNHANDLED' not in src, 'транслятор уронил команду в комментарий:\n  ' + \
+        '\n  '.join(l.strip() for l in src.split('\n') if 'UNHANDLED' in l)
     open(outp, 'w', encoding='utf-8').write(src)
     print(f'{inp} -> {outp} (цель {target}); IX-хелперов {len(_ix_used)}; exx-пар {exx_pairs}'
           + (f'; ограничитель темпа: {pace_desc}' if pace_desc else '')
