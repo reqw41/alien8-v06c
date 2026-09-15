@@ -66,13 +66,18 @@ Z=$WORK/zx_r$R
   > "$Z.mame.log" 2>&1
 NIT=$(sed -n 's/^итераций=\([0-9]*\) .*/\1/p' "$Z.log" 2>/dev/null)
 ATTR=$(sed -n 's/.*(attr \([0-9a-f]*\)).*/\1/p' "$Z.log" 2>/dev/null | head -1)
-if [ "${NIT:-0}" != "$ITERS" ]; then
-  echo "$R|НЕТ|—|—|ZX-сторона не сняла журнал (итераций ${NIT:-0} из $ITERS)" > "$WORK/res/$R.txt"
+if [ "${NIT:-0}" -lt 1 ]; then
+  echo "$R|НЕТ|—|—|ZX-сторона не сняла журнал вовсе" > "$WORK/res/$R.txt"
   rm -f "$Z.bin" "$Z.st.bin"; exit 0
 fi
+# Журнал КОРОЧЕ заказанного — законный случай: сам ОРИГИНАЛ вышел из главного цикла
+# (герой потерял все жизни, GAME OVER -> меню; lua печатает «ОБРЫВ»). Сверяем то, что
+# сняли: обрыв — свойство сценария, а не порта, и обязан воспроизвестись на Векторе.
+LOAD="да (attr $ATTR)"
+if [ "$NIT" != "$ITERS" ]; then LOAD="да, ОБРЫВ на $NIT (attr $ATTR)"; fi
 # сторона Вектора: состояние + пиксели против того же прогона
 A8ROOM=$R A8_IRQDROP=1 node tools/zxpix_vec.js build/alien8_vec.r0m build/alien8_vec.sld \
-  "$ITERS" "$STAND/$INPUTS" "$Z.bin" > "$Z.vec.log" 2>&1
+  "$NIT" "$STAND/$INPUTS" "$Z.bin" > "$Z.vec.log" 2>&1
 RC=$?
 rm -f "$Z.bin" "$Z.st.bin"          # 2 ГБ на комнату — держать нельзя
 ST=$(sed -n 's/^состояние: расхождений итераций \(.*\)$/\1/p' "$Z.vec.log")
@@ -90,7 +95,7 @@ case "$LAST" in
             [ "$FIRST" = "—" ] && FIRST=${F2:-"см. $Z.vec.log"} ;;
 esac
 [ $RC -eq 0 ] && PIX="$CMP/$CMP"
-echo "$R|да (attr $ATTR)|$STC|$PIX|$FIRST" > "$WORK/res/$R.txt"
+echo "$R|$LOAD|$STC|$PIX|$FIRST" > "$WORK/res/$R.txt"
 ONE
 chmod +x "$WORK/one.sh"
 export ROOT WORK STAND MAME INPUTS ITERS
