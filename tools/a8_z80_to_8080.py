@@ -1651,6 +1651,183 @@ a8_pz_rel2:
 """
 
 
+def a8_cut_attrs(src):
+    """Атрибутная память ZX — выбросить (§17.3 рецепта KL, цель `vec`).
+
+    На Векторе цвет — палитра, а не знакоместа, и 768 байт `zxaram` были мусорным ОЗУ в
+    ЗАЩИТНОЙ ЗОНЕ 0xC000-0xC7FF. Зона лежит в ПЛОСКОСТИ 2, а под цветной HUD (как в Knight
+    Lore) плоскость 2 нужна целиком под селектор — значит ни атрибутов, ни спиллов печати там
+    быть не должно. Вырезаны ВСЕ писатели атрибутов; сохранены крючки Вектора, поставленные
+    a8_vec.glue/hooks: `fill_attr` -> vec_set_pal (цвет комнаты и экрана «RE-PROGRAMMING»),
+    `clear_scrn` -> vec_wipe0, палитра меню.
+
+    Что вырезано (каждая замена — с assert на число):
+      calc_attrib_addr           расчёт адреса атрибута (3 вызывателя, см. ниже)
+      upd_55_58_to_5B            заливка атрибутов под объектом (тело -> ret, 11 вызывателей)
+      print_text/_in_colour      адрес атрибута, байт атрибута на символ; заодно ушли ЧЕТЫРЕ
+                                 `exx` и три `ex af,af'` — у i8080 это обмен с ячейкой (33 Б)
+      sub_BCAB                   заливка 3x3 под предметом в панели
+      colour_something           две заливки fill_DE, sub_A7AE, два байта 0x47, окно 3x3
+      sub_A7AE + byte_A7CA       рисунок панели атрибутами (тело и данные)
+      colour_panel               мёртвая и до нас (вызывателей нет) — снята целиком
+      clr_attr/fill_attr         тело; метка fill_attr ОСТАЁТСЯ — на ней висит крючок палитры
+      loc_B005                   пробег «перекраска» в гибели (звук sub_B5EE и задержка целы)
+      zxaram/zxvram              сами сегменты
+
+    НЕ трогаем: `set_room_attrs` (правит АТРИБУТЫ КОМНАТ в location_tbl — из них берётся
+    палитра), `curr_room_attrib`, `tmp_attrib` (ячейка сравнивается локстепом, её пишет
+    display_text_list), `BC_to_Attr_In_DE` (на Векторе это адрес в плоскости 0, см. a8_vec)."""
+    def cut(old, new, name, count=1):
+        nonlocal src
+        n = src.count(old)
+        assert n == count, "a8_cut_attrs: %s — вхождений %d, ждали %d" % (name, n, count)
+        src = src.replace(old, new)
+
+    def cutre(pat, new, name, count=1, flags=re.M | re.S):
+        nonlocal src
+        src, n = re.subn(pat, lambda m: new, src, count=count, flags=flags)
+        assert n == count, "a8_cut_attrs: %s (%d)" % (name, n)
+
+    # ---- 1. colour_something: остаются fill_attr (палитра), sub_BCAB, счётчик и print_lives ----
+    cut("""        ld a, 0x47   ; 'G'
+        ld de,  zxaram+0x2CE
+        ld b, 2
+        call fill_DE
+        ld de,  zxaram+0x2EE
+        ld b, 4
+        call fill_DE
+        call sub_A7AE
+        call sub_BCAB
+""", "        call sub_BCAB\n", 'colour_something: заливки панели')
+    cut("""        ld a, (curr_room_attrib)
+        cpl
+        and 7
+        add a, 0x42   ; 'B'
+        ld (light_years_attr), a
+        ld de, light_years_attr
+""", "        ld de, light_years_attr   ; байт атрибута строки print_text пропускает\n",
+        'colour_something: цвет счётчика')
+    cut("""        call sub_A7A3
+        ld hl,  zxaram+0x284
+        ld (hl), 0x47   ; 'G'
+        inc hl
+        ld (hl), 0x47   ; 'G'
+        ld hl,  zxaram+0x241
+        ld bc, 0x303
+        ld a, (light_years_attr)
+        call fill_window
+        jp print_lives
+""", "        call sub_A7A3\n        jp print_lives\n", 'colour_something: окно счётчика')
+    # ---- 2. sub_A7AE и её данные (рисунок панели атрибутами) ----
+    cutre(r'^sub_A7AE:\n.*?        DB 0x42, 0x42, 0x42, 0x42\n', '', 'sub_A7AE + byte_A7CA')
+    # ---- 3. upd_55_58_to_5B: заливка атрибутов под объектом ----
+    cutre(r'^upd_55_58_to_5B:\n.*?        ; End of function upd_55_58_to_5B\n',
+          "upd_55_58_to_5B:\n        ret   ; Вектор: атрибутов ZX нет\n"
+          "        ; End of function upd_55_58_to_5B\n", 'upd_55_58_to_5B')
+    # ---- 4. print_text / print_text_in_colour ----
+    # Байт атрибута строки (print_text) и tmp_attrib (print_text_in_colour) больше не нужны,
+    # `push bc` держал XY только для calc_attrib_addr, а альтернативный набор — адрес атрибута.
+    cut("""        ld a, (tmp_attrib)
+        ex af, af'
+        jr loc_BBC2
+""", "        jr loc_BBC2\n", 'print_text_in_colour: атрибут')
+    cut("""        ld a, (de)
+        ex af, af'
+        inc de
+loc_BBC2:
+        exx
+        pop hl
+        push de
+        call calc_attrib_addr
+        ld l, e
+        ld h, d
+        pop de
+loc_BBCB:
+        exx
+""", "        inc de   ; байт атрибута строки — на Векторе только пропустить\nloc_BBC2:\nloc_BBCB:\n",
+        'print_text: адрес атрибута')
+    cut("""        pop bc
+        push bc
+        call calc_screen_buffer_addr
+""", "        pop bc\n        call calc_screen_buffer_addr\n", 'print_text: XY для атрибута', count=2)
+    cut("""        exx
+        ex af, af'
+        ld (hl), a
+        inc l
+        ex af, af'
+        jr loc_BBCB
+""", "        jr loc_BBCB\n", 'print_text: байт атрибута на символ')
+    cut("""        exx
+        ex af, af'
+        ld (hl), a
+        exx
+        ret
+""", "        ret\n", 'print_text: байт атрибута последнего символа')
+    # ---- 5. sub_BCAB: заливка 3x3 под предметом панели ----
+    cut("""        push bc
+        push hl
+        ld a, (hl)
+        and 0xF
+        ld e, a
+        ld d, 0
+        ld hl, byte_BD34
+        add hl, de
+        ld c, (hl)
+        ld l, (ix+26)
+        ld a, (ix+27)
+        add a, 0x17
+        ld h, a
+        call calc_attrib_addr
+        ex de, hl
+        ld a, c
+        ld bc, 0x303
+        call fill_window
+        pop hl
+        pop bc
+""", "", 'sub_BCAB: заливка под предметом')
+    # ---- 6. colour_panel: вызывателей нет и в оригинале ----
+    cutre(r'^colour_panel:\n        xor a\n.*?        jp fill_window\n', '', 'colour_panel')
+    # ---- 7. clr_attr/fill_attr: тело долой, метка fill_attr держит крючок палитры ----
+    cut("""fill_attr:
+        ld e, a
+        ld hl, zxaram
+        ld bc, 0x300
+        jr fill_mem
+""", "fill_attr:\n        ret   ; Вектор: атрибутов ZX нет (крючок палитры ставит a8_vec.glue)\n",
+        'fill_attr')
+    # ---- 8. «перекраска» в гибели: пробег по атрибутам долой, звук и задержка целы ----
+    # Пробег красит 768 знакомест и служит ЗАДЕРЖКОЙ между 16 звуками «перекраски»: сами
+    # записи в атрибуты уходят, счёт остаётся — иначе гибель отыграет мелодию вчетверо быстрее.
+    # Строки `loc_B00B:` и `jr nz, loc_B00B` ОБЯЗАНЫ уцелеть: на них стоит сайт a8_sound_ay
+    # (лесенка вместо эффекта), а это чужой файл.
+    cut("""loc_B00B:
+        ld a, (hl)
+        and 0xF8   ; 'ø'
+        ld e, a
+        ld a, (hl)
+        inc a
+        and 7
+        or e
+        ld (hl), a
+        inc hl
+        dec bc
+""", "loc_B00B:   ; Вектор: записи в атрибуты вырезаны, счёт остался задержкой\n        dec bc\n",
+        'loc_B005: перекраска')
+    cut("""loc_B005:
+        ld hl, zxaram
+        ld bc, 0x300
+""", "loc_B005:\n        ld bc, 0x300\n", 'loc_B005: адрес атрибутов')
+    # ---- 9. сам расчёт адреса ----
+    cutre(r'^calc_attrib_addr:\n.*?        ; End of function calc_attrib_addr\n', '', 'calc_attrib_addr')
+    # ---- 10. сегменты: zxaram уходит целиком, zxvram остаётся двумя ссылками ----
+    # (их снимает a8_vec.glue: loc_CE60 -> vec_wipe0 и update_screen -> блок Вектора)
+    cutre(r'^        ORG 0x5800\nzxaram:\n        DS 0x300\n', '', 'сегмент zxaram')
+    cutre(r'^        ORG 0x4000\nzxvram:\n        DS 0x1800\n', '', 'сегмент zxvram')
+    assert 'zxaram' not in src, "остались ссылки на zxaram: " + str(re.findall(r'[^\n]*zxaram[^\n]*', src))
+    left = re.findall(r'[^\n]*zxvram[^\n]*', src)
+    assert left == ['        ld hl, zxvram', '        ld de,  zxvram+0x17E0'], left
+    return src
+
 def a8_cut_controls(src, vec=False):
     """Варианты ввода ZX (Kempston, курсорный джойстик, Interface II) вырезаны — на Векторе
     только клавиатура. Меню повторяет порт Городецкого (caglrc.cc/scalar/ware/558): шесть строк —
@@ -2014,6 +2191,7 @@ def a8_vec_glue(src):
         _IX_INLINE_FUNCS.update(A8_VEC_INLINE)
     elif hot not in ('', '0'):
         _IX_INLINE_FUNCS.update(x for x in hot.split(',') if x)
+    src = a8_cut_attrs(src)            # атрибутная память ZX — долой (§17.3 рецепта KL)
     src = a8_vec.glue(src)
     src = a8_logic_fixes(src)          # три сайта самомодификации логики + djnz/Z + перенос (ix+25)
     src = a8_vec.hooks(src)            # палитра комнаты и меню
