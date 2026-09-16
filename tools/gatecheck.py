@@ -202,6 +202,23 @@ MUTS = [
          file="tools/a8_z80_to_8080.py",
          old='    return ["ld a,(hl)"] + _shift_body(op) + ["ld (hl),a", "ld a,(il_a)", "ld hl,(il_tmp2)"]',
          new='    return ["ld a,(hl)"] + [] + ["ld (hl),a", "ld a,(il_a)", "ld hl,(il_tmp2)"]   # ПОРЧА: ячейка (ix+d) не сдвигается'),
+    dict(name="spill", gate="spill",
+         why="очистка буфера идёт на столбец дальше края (clear_scrn_buffer: `ld b, 32` -> 33): "
+             "192 записи за плоскость 1, в страницу 0xC000. ЭТО ВИДИТ ТОЛЬКО spillcheck: картинка "
+             "не меняется вовсе (лишний столбец за краем буфера никто не блитит), и гейт пикселей "
+             "против ZX на той же сборке остаётся ЗЕЛЁНЫМ — проверено",
+         file="tools/a8_vec.py",
+         old='               "        ld hl, vidbuf+32\\n        ld b, 32\\n"',
+         new='               "        ld hl, vidbuf+32\\n        ld b, 33\\n"   # ПОРЧА: столбец за краем'),
+    dict(name="psfix", gate="spill",
+         why="ps_cw не двигает SP за непрочитанный хвост строки (снят `ld (ps_fix+1), a`): "
+             "обрезанная печать разъезжается по строкам. В ИГРЕ КЛИП НЕ СРАБАТЫВАЕТ НИ РАЗУ "
+             "(замер: 128 комнат, 377 740 печатей, самый правый столбец ровно 31), поэтому "
+             "порча ловится только на сборке A8_PSCW=test, где край объявлен столбцом 30 — "
+             "на обычной сборке она ПРОХОДИТ мимо всех гейтов, и это тоже проверено",
+         file="tools/a8_vec.py",
+         old="        ld (ps_fix+1), a\n",
+         new="        ; ПОРЧА: SP за непрочитанный хвост не двигаем\n"),
     dict(name="sfx", gate="aycheck",
          why="период шума эффекта 1 маскируется 0x3F вместо 0x1F: R6 расходится с моделью MSX",
          file="tools/a8_sound_ay.py",
@@ -260,6 +277,23 @@ def gate_result(gate, env=None):
                 if r.returncode:
                     return r.returncode, ("hot=%s %s: " % (hot, tag)) + (r.stdout + r.stderr)[-300:]
         return 0, "все шесть прогонов (2 сборки x 3 сценария) зелёные"
+    if gate == "spill":
+        # ДВЕ СБОРКИ. 1) обычная: в 0xC000-0xC7FF не должно попасть ни байта (страницы плоскости 2
+        # отданы под селектор цветного HUD). 2) A8_PSCW=test, где край объявлен столбцом 30 и клип
+        # срабатывает: там проверяется ИНВАРИАНТ ЧТЕНИЯ СПРАЙТА (A8PSSP) — без такой сборки ветка
+        # ps_fix непроверяема, в игре клип не срабатывает ни разу.
+        for tag, benv, gh in (("обычная", {}, {}),
+                              ("A8_PSCW=test", {"A8_PSCW": "test"}, {"A8PSSP": "1"})):
+            e = dict(env or {}); e.update(benv)
+            b = build("vec", e)
+            if b.returncode:
+                return b.returncode, (tag + ": ") + (b.stdout + b.stderr)[-400:]
+            ge = dict(env or {}); ge.update(gh); ge["A8_IRQDROP"] = "1"
+            r = run(["node", "tools/spillcheck_vec.js", "build/alien8_vec.r0m", "build/alien8_vec.sld",
+                     "200", os.path.join(STAND, "inputs_alive.txt")], ge)
+            if r.returncode:
+                return r.returncode, (tag + ": ") + (r.stdout + r.stderr)[-300:]
+        return 0, "обе сборки: ни одной записи в плоскость 2, SP цепочки сходится"
     b = build("vec", env)
     if b.returncode:
         return b.returncode, (b.stdout + b.stderr)[-400:]

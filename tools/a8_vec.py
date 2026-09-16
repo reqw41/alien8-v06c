@@ -1466,7 +1466,9 @@ def glue_i8080(src):
                "        di   ; SP уходит в данные спрайта — прерывание испортило бы их\n"
                "        ld (tmp_SP), sp\n", 'print_sprite: бюджет и di')
     src = _sub(src, r'^        ld sp, \(tmp_SP\)\n        ret\n',
-               "        ld sp, (tmp_SP)\n;__EI_BEG__\n        ei\n;__EI_END__\n"
+               "ps_done:   ; SP ещё указывает в данные спрайта: по нему стенд проверяет,\n"
+               "        ld sp, (tmp_SP)   ;   что цепочка прочитала ровно 2*w*h байт (см. spillcheck_vec.js)\n"
+               ";__EI_BEG__\n        ei\n;__EI_END__\n"
                ";__CU_BEG__\n        call vec_cu   ; догоняющий ISR; ei делает он сам\n;__CU_END__\n"
                "        ret\n", 'print_sprite: ei')
     # цепочки должны лежать в ОДНОЙ странице: патчится только младший байт `jp`
@@ -1477,7 +1479,9 @@ def glue_i8080(src):
     beg = "        jr loc_D04B\n"
     assert src.count(beg) == 1, 'print_sprite: начало выровненной цепочки'
     a = src.index(beg) + len(beg)
-    end = ("        ld sp, (tmp_SP)\n;__EI_BEG__\n        ei\n;__EI_END__\n"
+    end = ("ps_done:   ; SP ещё указывает в данные спрайта: по нему стенд проверяет,\n"
+           "        ld sp, (tmp_SP)   ;   что цепочка прочитала ровно 2*w*h байт (см. spillcheck_vec.js)\n"
+           ";__EI_BEG__\n        ei\n;__EI_END__\n"
            ";__CU_BEG__\n        call vec_cu   ; догоняющий ISR; ei делает он сам\n;__CU_END__\n"
            "        ret\n")
     assert src.count(end) == 1, 'print_sprite: конец пиксельного цикла'

@@ -17,6 +17,14 @@
 //
 // Почему PC, а не просто счётчик: писателей ровно два класса — цепочки print_sprite и заливка
 // fill_window, и по PC сразу видно, чей клип отвалился.
+//
+// A8PSMAX=1 — ЗАПАС ДО КРАЯ: самый правый столбец, который печать заняла бы без клипа.
+// A8PSSP=1  — ИНВАРИАНТ ЧТЕНИЯ СПРАЙТА: SP к метке ps_done обязан уйти ровно на длину
+//             прочитанных строк. Смотреть его имеет смысл на сборке A8_PSCW=test (край
+//             объявлен столбцом 30): в игре клип не срабатывает ни разу, и на обычной
+//             сборке этот инвариант держится сам собой, ничего не доказывая. ЗАМЕРЕНО:
+//             порча «не двигать SP за непрочитанный хвост» краснеет на A8_PSCW=test и
+//             ПРОХОДИТ на обычной сборке — ровно поэтому test-сборка и нужна.
 "use strict";
 const fs = require("fs"), vm = require("vm"), cp = require("child_process");
 const base = "/Users/boris/projects/vector06js";
@@ -98,12 +106,30 @@ function run(room) {
   // Снимается на патче `ld (ps_end+1),a` (ровно один на вызов print_sprite): к этому моменту
   // B = страница столбца в буфере, а в иммедиате loc_D10F+1 уже лежит w-1 (ширина до клипа).
   const PSMAX = !!process.env.A8PSMAX; let psmax = -1, psn = 0; const psHist = new Map();
+  // A8PSSP=1 — ИНВАРИАНТ ЧТЕНИЯ СПРАЙТА: цепочка читает данные ЧЕРЕЗ SP, и обрезанная по
+  // столбцу 31 цепочка не дочитывает 2*(w-w') байт строки — за них SP двигает ps_fix. Проверка:
+  // к метке ps_done (SP ещё в данных спрайта) SP обязан уйти ровно на 2*K*h от точки входа,
+  // где K = w для выровненного пути и w-1 для сдвинутого, w — ширина ДО клипа из (ix+24),
+  // h — высота окна. Ломается ровно тогда, когда ломается компенсация ps_fix; в игре клип не
+  // срабатывает, поэтому смотреть этот инвариант имеет смысл на сборке A8_PSCW=test.
+  const PSSP = !!process.env.A8PSSP; let spBad = 0, spN = 0, spWant = -1; const spFirst = [];
   memory.write = function (a, w, s) {
     a &= 0xffff;
-    if (PSMAX && a === L.ps_end + 1) {
+    if ((PSMAX || PSSP) && a === L.ps_end + 1) {
       const right = (cpu.regs[0] - (L.vidbuf >> 8)) + rd(L.loc_D10F + 1);
       psn++; psHist.set(right, (psHist.get(right) || 0) + 1);
       if (right > psmax) psmax = right;
+      if (PSSP) {
+        const ix = rd(L.z80_ix) | (rd(L.z80_ix + 1) << 8);
+        const wid = rd(ix + 24), h = (w - cpu.regs[1]) & 0xFF;
+        const de = (cpu.regs[2] << 8) | cpu.regs[3];
+        const K = (rd(L.a8_psx) & 7) ? wid - 1 : wid;   // сдвинутый путь читает на столбец меньше
+        // ХВОСТ ПОСЛЕДНЕЙ СТРОКИ НЕ ДОСЫЛАЕТСЯ И НЕ ДОЛЖЕН: ps_fix висит на переходе К
+        // СЛЕДУЮЩЕЙ строке (ps_jrow), то есть срабатывает h-1 раз. После цикла SP всё равно
+        // возвращается из tmp_SP, а DE цело — недочитанные 2*(w-w') последней строки никому
+        // не мешают. Зато если компенсация отвалится совсем, недобор будет в (h-1) раз больше.
+        spWant = (de + 2 * (K * h - (wid - (rd(L.loc_D10F + 1) + 1)))) & 0xFFFF;
+      }
     }
     if (a >= LO && a <= HI) {
       hits++; byPC.set(cpu.pc, (byPC.get(cpu.pc) || 0) + 1);
@@ -126,11 +152,16 @@ function run(room) {
   while (iter - startIter < N && steps < 3e8) {
     if (frc >= 59904) { frc -= 59904; if (!(IRQDROP && !cpu.iff)) { v06c.irq = true; v06c.checkInterrupt(); } }
     const c = (cpu.instruction(), cpu.vcycles);
+    if (PSSP && cpu.pc === L.ps_done && spWant >= 0) {
+      spN++;
+      if (cpu.sp !== spWant) { spBad++; if (spFirst.length < 6) spFirst.push({ iter, sp: cpu.sp, want: spWant }); }
+      spWant = -1;
+    }
     steps++; frc += c; tacc += c;
     if (tacc > 1) { const tn = tacc >> 1; tacc -= tn * 2; timer.Count(tn); }
     if (cpu.last_opcode === 0xd3) io.commit();
   }
-  return { iters: iter - startIter, hits, byPC, first, psmax, psn, psHist };
+  return { iters: iter - startIter, hits, byPC, first, psmax, psn, psHist, spBad, spN, spFirst };
 }
 
 // ---- комнаты ----
@@ -141,12 +172,15 @@ else if (ROOMSA) rooms = ROOMSA.trim().split(/[\s,]+/).map(Number);
 console.log(`ГЕЙТ ПЛОСКОСТИ 2: диапазон ${LO.toString(16)}-${HI.toString(16)}, комнат ${rooms.length}, ` +
             `${N} итераций, сценарий ${INPUTS ? INPUTS.replace(/.*\//, "") : "покой"}`);
 let total = 0, badRooms = 0; const allPC = new Map(); let PSMAX = -1, PSN = 0; const PSH = new Map();
+let SPN = 0, SPBAD = 0; const SPSHOW = [];
 for (const room of rooms) {
   const r = run(room);
   total += r.hits;
   for (const [pc, n] of r.byPC) allPC.set(pc, (allPC.get(pc) || 0) + n);
   if (r.psmax > PSMAX) PSMAX = r.psmax;
   PSN += r.psn; for (const [k, n] of r.psHist) PSH.set(k, (PSH.get(k) || 0) + n);
+  SPN += r.spN; SPBAD += r.spBad;
+  if (r.spBad && SPSHOW.length < 6) for (const f of r.spFirst) SPSHOW.push(`комната ${room || "стартовая"} итерация ${f.iter}: SP ${f.sp.toString(16)}, ждали ${f.want.toString(16)}`);
   if (r.hits) {
     badRooms++;
     console.log(`  комната ${room || "стартовая"}: ЗАПИСЕЙ ${r.hits} за ${r.iters} итераций`);
@@ -158,6 +192,12 @@ if (PSN) {
   console.log(`ЗАПАС ДО КРАЯ: печатей ${PSN}, самый правый занятый столбец ${PSMAX} (край буфера — 31)`);
   console.log("  хвост распределения: " + [...PSH.entries()].sort((a, b) => b[0] - a[0]).slice(0, 6)
     .map(([c, n]) => `столбец ${c} x${n}`).join(", "));
+}
+if (process.env.A8PSSP) {
+  console.log(`ЧТЕНИЕ СПРАЙТА ЧЕРЕЗ SP: печатей проверено ${SPN}, SP разошёлся с 2*w*h на ${SPBAD}`);
+  for (const l of SPSHOW) console.log("  " + l);
+  if (SPBAD) { console.log("КРАСНЫЙ: цепочка прочитала не ту длину строки — компенсация ps_fix сломана"); process.exit(1); }
+  if (!SPN) { console.log("ПУСТАЯ ВЫБОРКА: печатей не было"); process.exit(1); }
 }
 if (total) {
   console.log("писатели (PC x записей):");
