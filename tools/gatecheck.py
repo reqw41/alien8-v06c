@@ -58,6 +58,13 @@ PIXSCEN = [('покой', 'inputs_idle.txt', 'zx_screen_idle.bin', None),
            ('137 + гибель', 'inputs_death137.txt', 'zx_screen_death137.bin', '137')]
 
 # гейт границы занятых записей: сценарий -> (ввод, комната, итераций)
+# гейт белого HUD: экран -> (окружение hudshot_vec.js, ключи hudcolor.py).
+# _iters — сколько ИТЕРАЦИЙ крутить после входа в комнату (для экранов по кадрам не нужно).
+HUDSCEN = [('комната 19 (старт)', {'_iters': '40'}, []),
+           ('комната 137', {'_iters': '40', 'A8ROOM': '137'}, []),
+           ('меню', {'_iters': '0', 'A8HS_FRAMES': '260'}, ['--nomask']),
+           ('GAME OVER', {'_iters': '40', 'A8HS_JP': 'game_over@400'}, ['--nomask'])]
+
 NOBJSCEN = [('покой', 'inputs_idle.txt', None, '60'),
             ('прогулка', 'inputs_walk.txt', None, '600'),
             ('гибель в соседней', 'inputs_death.txt', None, '600'),
@@ -260,6 +267,17 @@ MUTS = [
          file="tools/a8_z80_to_8080.py",
          old="    wins = [(lo, min(lo + 0x20, hi) - lo)]\n",
          new="    wins = [(lo, min(lo + 0x40, hi) - lo)]   # ПОРЧА: первая дыра в картинку\n"),
+    dict(name="hudzone", gate="hudcolor",
+         why="зона счётчика LIGHT YEARS сдвинута на 4 строки (0xC4, 2, 56 -> 60): маска "
+             "закрывает не знакоместо ZX, а его половину, и цифры счётчика режутся на два "
+             "цвета — верх белый, низ цветом комнаты. Ассемблер и все гейты плоскости 0 при "
+             "этом ЗЕЛЁНЫЕ: картинка, состояние и темп не меняются ни на бит, маска живёт в "
+             "ДРУГОЙ плоскости. Проверки «вне зон плоскость 2 = 0» и «зона заполнена целиком» "
+             "порчу тоже не видят — они читают ту же испорченную таблицу; ловит её только "
+             "проверка «знакоместо одного цвета»",
+         file="tools/a8_vec.py",
+         old="vec_hudcols:\tDB\t\t0xC4, 2, 56, 8",
+         new="vec_hudcols:\tDB\t\t0xC4, 2, 60, 8   ; ПОРЧА: зона сдвинута на 4 строки"),
     dict(name="spresv", gate="spcheck",
          why="буфер под стеком урезан с 256 до 32 байт: замеренная глубина (44 Б на ходьбе, 68 Б "
              "на обходе комнат) в него не влезает, то есть стек сел бы на код нижнего региона. "
@@ -336,6 +354,26 @@ def gate_result(gate, env=None):
         out = b.stdout + b.stderr
         rc = 1 if (b.returncode and re.search(r'(?i)assert', out)) else 0
         return rc, out[-400:]
+    if gate == "hudcolor":
+        # ГЕЙТ БЕЛОГО HUD. Снимается четыре экрана, и у каждого своя сторона проверки:
+        # две игровые комнаты с РАЗНЫМ цветом (маска обязана стоять и знакоместа быть
+        # одноцветными по перу HUD) и два экрана БЕЗ панели — меню и GAME OVER, где маска
+        # обязана быть погашена (в Knight Lore именно на GAME OVER она белила рамку кусками).
+        b = build("vec", env)
+        if b.returncode:
+            return b.returncode, (b.stdout + b.stderr)[-400:]
+        for tag, shot, hc in HUDSCEN:
+            e = dict(env or {})
+            e.update(shot)
+            e["A8HS_DUMP"] = "build/gate_hud.txt"
+            r = run(["node", "tools/hudshot_vec.js", "build/alien8_vec.r0m",
+                     "build/alien8_vec.sld", e.pop("_iters", "40"), "build/gate_hud.png"], e)
+            if r.returncode:
+                return r.returncode, (tag + ": снимок не снялся: ") + (r.stdout + r.stderr)[-300:]
+            r = run(["python3", "tools/hudcolor.py"] + hc + ["build/gate_hud.txt"], env)
+            if r.returncode:
+                return r.returncode, (tag + ": ") + (r.stdout + r.stderr)[-300:]
+        return 0, "четыре экрана: знакоместа одноцветны, маска стоит в комнатах и погашена вне их"
     if gate == "regions":
         b = build("vec", env)
         if b.returncode:
