@@ -961,6 +961,328 @@ _H_HARD = re.compile(r'(?i)^(ORG|DEVICE|SAVEBIN|SAVESNA|ASSERT|ALIGN|IF|ELSE|END
 _H_TERM = re.compile(r'(?i)^(ret$|jp\s+(?!nz\b|z\b|nc\b|c\b|po\b|pe\b|p\b|m\b))')
 
 
+# ---------------------------------------------------------------------------
+# ДЫРЫ ВНЕ КАРТИНКИ (цель vec). §17.5 рецепта Knight Lore.
+#
+# Картинка занимает строки 32..223 каждого из 32 столбцов плоскости (адрес = база + столбец*256
+# + 32 + Y). Строки 224..255 столбца c и 0..31 столбца c+1 лежат в памяти ПОДРЯД — это 64
+# непрерывных байта, куда не пишет ни рендер, ни очистка буфера, и на экране они всегда чёрные.
+# 32 столбца дают 32 + 31*64 + 32 = 2048 байт. У Alien 8 отдана плоскость 1 (буфер 0xA000):
+# её очистка (clear_scrn_buffer, a8_vec.py) с самого начала идёт ПОСТОЛБЦОВО по строкам 32..223,
+# отдельной платы за дыры нет. ЗАМЕР (tools/holescan_vec.js): шесть сценариев по 200 итераций и
+# все 128 комнат по 150 — в плоскости 1 тронуты РОВНО строки 32..223, ни одной записи в дыры.
+#
+# Туда уезжают самостоятельные процедуры нижнего региона. Темп не меняется: у i8080 нет ни кэша,
+# ни штрафа за выравнивание — адрес процедуры на её скорость не влияет.
+# ---------------------------------------------------------------------------
+_H_ANYLBL = re.compile(r'^\.?[A-Za-z_][A-Za-z0-9_]*:')
+_H_DATA = re.compile(r'(?i)^(DB|DW|DEFB|DEFW|DC)\b')
+_H_PAD = re.compile(r'(?i)^(ORG|ALIGN)\b')
+_H_SKIP = re.compile(r'(?i)^(ASSERT|DEVICE|SAVEBIN|SAVESNA|IF|ELSE|ENDIF|OUTPUT|DISPLAY|END)\b')
+# Операнд IX-хелпера: `call il_ix_lda` + `db 7` — это не данные, а вторая половина одной
+# развёрнутой инструкции (ix+d). Считается за 1 байт и блок кодом быть не перестаёт.
+_H_IXCALL = re.compile(r'(?i)^call\s+il_')
+_H_IXDB = re.compile(r'(?i)^db\s')
+# метка в «адресном» выражении: high/low, сдвиг, маска, разность адресов. Такой блок двигать
+# нельзя — его адрес либо читают по половине, либо он участвует в ASSERT'е.
+_H_SENS = re.compile(r'(?i)(?:\b(?:high|low)\s*\(?\s*([A-Za-z_]\w*))'
+                     r'|(?:([A-Za-z_]\w*)\s*(?:&|\||\^|\*|/|%|<<|>>|-))'
+                     r'|(?:(?:&|\||\^|\*|/|%|<<|>>|-)\s*([A-Za-z_]\w*))')
+
+
+def _db_len(code):
+    """Длина строки DB/DW в байтах. Ошибка в меньшую сторону ловится ASSERT'ом дыры при сборке."""
+    mn = code.split()[0].upper()
+    unit = 2 if mn in ('DW', 'DEFW') else 1
+    rest = code[len(mn):].strip()
+    items, cur, q, depth = [], '', None, 0
+    for ch in rest:
+        if q:
+            cur += ch
+            if ch == q:
+                q = None
+            continue
+        if ch in '"\'':
+            q = ch; cur += ch; continue
+        if ch in '([':
+            depth += 1
+        elif ch in ')]':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            items.append(cur); cur = ''; continue
+        cur += ch
+    if cur.strip():
+        items.append(cur)
+    n = 0
+    for it in items:
+        it = it.strip()
+        if len(it) >= 2 and it[0] in '"\'' and it[-1] == it[0]:
+            n += (len(it) - 2) * unit
+        else:
+            n += unit
+    return n
+
+
+def a8_walk(lines, hi):
+    """Адрес каждой строки исходника от начала до hi включительно; None — если счёт сбился.
+
+    Нужен ровно для одного числа — сколько байт добивки съедает `ALIGN 256` перед таблицей
+    a8_optr: блок, снятый ВЫШЕ этого ALIGN'а, нижний регион не укорачивает, пока добивка не
+    перевалит через страницу. Сторож счёта — ASSERT'ы регионов в ассемблере и отдельная сверка
+    с листингом (tools/check_plane1.py --walk): промах стоит места, но не поведения.
+
+    ORG у Alien 8 бывает СИМВОЛИЧЕСКИМ (`ORG a8_low_resume` — возврат из разреза спрайтов),
+    поэтому значения меток `X: equ $` запоминаются на ходу."""
+    eqs, syms = {}, {}
+    for l in lines:
+        m = re.match(r'^([A-Za-z_]\w*)[: \t]+\s*(?:EQU|equ)\s+(.+)$', l.split(';')[0].strip())
+        if m and m.group(2).strip() != '$':
+            eqs[m.group(1)] = m.group(2).strip()
+
+    def ev(e):
+        for k, v in eqs.items():
+            e = re.sub(r'\b' + k + r'\b', '(' + v + ')', e)
+        return int(eval(e, {'__builtins__': {}}, {}))
+
+    addr, at, prev_ix = None, [None] * (hi + 1), False
+    for i in range(hi + 1):
+        l = lines[i]
+        m = _H_ANYLBL.match(l)
+        code = ' '.join((l[m.end():] if m else l).split(';')[0].split())
+        at[i] = addr
+        me = re.match(r'^([A-Za-z_]\w*)[: \t]+\s*(?:EQU|equ)\s+\$\s*$', l.split(';')[0].strip())
+        if me:                                          # `метка: equ $` — запомнить адрес
+            syms[me.group(1)] = addr
+            continue
+        if not code:
+            continue
+        u = code.upper()
+        if u.startswith('ORG'):
+            a = code.split(None, 1)[1].strip()
+            try:
+                addr = int(a, 0)
+            except ValueError:
+                addr = syms.get(a)
+            prev_ix = False
+            continue
+        if addr is None:
+            continue
+        if u.startswith('ALIGN'):
+            n = int(code.split()[1], 0)
+            addr = (addr + n - 1) & ~(n - 1)
+            prev_ix = False
+            continue
+        if u.startswith('DS'):
+            try:
+                addr += ev(code.split(None, 1)[1].split(',')[0])
+            except Exception:
+                return None
+            prev_ix = False
+            continue
+        if _H_IXDB.match(code) and prev_ix:             # операнд IX-хелпера (1 или 2 байта)
+            addr += _db_len(code)
+            prev_ix = False
+            continue
+        if _H_DATA.match(code):
+            addr += _db_len(code)
+            prev_ix = False
+            continue
+        if re.search(r'(?i)\bequ\b', code) or _H_SKIP.match(code):
+            continue
+        n = _i8080_len(code)
+        if n is None:
+            return None                                 # неизвестная инструкция — счёт врёт
+        addr += n
+        prev_ix = bool(_H_IXCALL.match(code))
+    return at
+
+
+def a8_holes(base, pages=32):
+    """Дыры одной плоскости: (адрес, размер). Строки 224..255 столбца c + 0..31 столбца c+1."""
+    h = [(base, 32)]
+    h += [(base + c * 256 + 224, 64) for c in range(pages - 1)]
+    h.append((base + (pages - 1) * 256 + 224, 32))
+    return h
+
+
+A8_HOLE_PLANES = [0xA000]           # плоскость 1 (буфер): её дыры вне картинки отданы под код.
+# Плоскость 0 (экран) в фазе игры тоже пишется только в строках 32..223 (замер holescan), но её
+# vec_boot стирает СПЛОШНЫМ циклом 8 КБ — прежде чем брать и её дыры, очистку надо переписать
+# постолбцово. Пока не понадобилось: плоскости 1 хватило.
+A8_HOLE_BYTES = int(os.environ.get('A8_HOLE_BYTES', '-1'))   # -1 = сколько влезет
+A8_HOLE_SKIP = tuple(x for x in os.environ.get('A8_HOLE_SKIP', '').split(',') if x)
+A8_HOLES = [h for b in A8_HOLE_PLANES for h in a8_holes(b)]
+A8_LOW_END = 'ASSERT $ <= 0x7f00'   # метка конца нижнего региона в собранном тексте
+
+
+def a8_pack_holes(src, holes, need=-1, exclude=()):
+    """Увезти мелкие самостоятельные процедуры нижнего региона в дыры вне картинки.
+
+    Блок «метка: ... ret/jp» движим, если:
+      * весь состоит из инструкций (операнд IX-хелпера `db d` — часть инструкции, см. _H_IXDB);
+      * кончается БЕЗУСЛОВНОЙ передачей управления (иначе из него проваливаются вниз);
+      * предыдущий блок тоже кончается безусловно и непуст (иначе метка-синоним или провал
+        сверху) — в противном случае на месте блока остаётся `jp <метка>` (3 Б);
+      * перед ним нет ORG/ALIGN (иначе на его адрес уедет следующий блок);
+      * его метка не участвует в адресной арифметике (high/low, маска, сдвиг, разность) и ни
+        в одном ASSERT'е: такие адреса читают по половине или проверяют.
+
+    ALIGN 256 перед таблицей a8_optr. Блок, снятый ВЫШЕ него, нижний регион НЕ укорачивает —
+    он ровно на свой размер удлиняет добивку, пока та не перевалит через страницу (тогда разом
+    −256 Б). Поэтому блоки НИЖЕ ALIGN'а кладутся первыми (там байт за байт), а на снятое выше
+    перебирается квота: лучший вариант считается точно и берётся он."""
+    if not holes or need == 0:
+        return src, 0, 0, ''
+    lines = src.split('\n')
+    end = next(i for i, l in enumerate(lines) if A8_LOW_END in l)
+    nocom = '\n'.join(l.split(';')[0] for l in lines)
+    sens = set()
+    for l in nocom.split('\n'):
+        if re.match(r'(?i)^\s*ASSERT\b', l):           # метка в ASSERT'е: её адрес проверяют
+            sens.update(re.findall(r'[A-Za-z_]\w*', l))
+    for m in _H_SENS.finditer(nocom):
+        sens.add(m.group(1) or m.group(2) or m.group(3))
+    # ---- разбор на блоки ----
+    blocks, cur, low, prev_pad, prev_ix = [], None, False, False, False
+    for i in range(end):
+        raw = lines[i]
+        m = _H_LBL.match(raw)
+        ml = m or _H_ANYLBL.match(raw)
+        body = raw[ml.end():] if ml else raw
+        code = ' '.join(body.split(';')[0].split())    # пробелы схлопнуть: иначе `jp\s+` в _H_TERM
+        if m:                                          # отступает назад и «jp nz, x» сойдёт за jp
+            cur = {'name': m.group(1), 'i0': i, 'iend': i + 1, 'size': 0, 'ok': True,
+                   'low': low, 'after_pad': prev_pad, 'last': ''}
+            blocks.append(cur)
+        if not code:
+            continue
+        if _H_PAD.match(code):
+            prev_pad = True
+            if code.upper().startswith('ORG'):
+                a = code.split(None, 1)[1].strip()
+                try:
+                    low = 0x0100 <= int(a, 0) < 0x8000
+                except ValueError:
+                    low = (a == 'a8_low_resume')       # возврат из разреза спрайтов
+        else:
+            prev_pad = False
+        ixdb = bool(_H_IXDB.match(code)) and prev_ix
+        if cur is not None:
+            if ixdb:
+                cur['size'] += _db_len(code)   # `db d` (или `db d, n` у il_*_stn) — часть инструкции
+                cur['iend'] = i + 1
+            elif _H_HARD.match(code):
+                cur['ok'] = False
+            else:
+                n = _i8080_len(code)
+                if n is None:
+                    cur['ok'] = False
+                else:
+                    cur['size'] += n
+                    cur['last'] = code
+                    cur['iend'] = i + 1
+        prev_ix = bool(_H_IXCALL.match(code))
+    # ---- ALIGN 256 нижнего региона: где он и какова добивка сейчас ----
+    at = a8_walk(lines, end) or []
+    aligns = []
+    for i in range(end):
+        ml = _H_ANYLBL.match(lines[i])
+        code = ' '.join((lines[i][ml.end():] if ml else lines[i]).split(';')[0].split())
+        if code.upper().startswith('ALIGN') and i < len(at) and at[i] is not None:
+            n = int(code.split()[1], 0)
+            if n >= 64 and 0x0100 <= at[i] < 0x8000:
+                aligns.append((i, at[i], n))
+    lastbig, pad0, amod = -1, 0, 256
+    if aligns:
+        lastbig, aaddr, amod = aligns[-1]
+        pad0 = (-aaddr) % amod
+    maxh = max(h[1] for h in holes)
+    # ---- кандидаты ----
+    cand = []
+    for k, b in enumerate(blocks):
+        pv = blocks[k - 1] if k else None
+        if not (b['low'] and b['ok'] and 0 < b['size'] <= maxh):
+            continue
+        if b['after_pad'] or b['name'] in exclude or b['name'] in sens:
+            continue
+        if not _H_TERM.match(b['last']):
+            continue
+        b['stub'] = pv is None or pv['size'] == 0 or not (pv['ok'] and _H_TERM.match(pv['last']))
+        b['net'] = b['size'] - (3 if b['stub'] else 0)
+        if b['net'] < 1:                               # заглушка съедает весь выигрыш
+            continue
+        b['above'] = b['i0'] < lastbig
+        cand.append(b)
+    # НИЖЕ ALIGN'а — первыми (там выигрыш байт за байт), без заглушки — раньше, крупные — раньше
+    cand.sort(key=lambda b: (b['above'], bool(b['stub']), -b['size'], b['name']))
+
+    def lay(ycap):
+        """Разложить кандидатов по дырам при квоте ycap на СНЯТОЕ ВЫШЕ ALIGN'а (None = без квоты)."""
+        free = [[a, sz] for a, sz in holes]
+        placed, below, above = [[] for _ in holes], 0, 0
+        for b in cand:
+            if need >= 0 and below + above >= need:
+                break
+            if b['above'] and ycap is not None and above + b['net'] > ycap:
+                continue
+            best = -1
+            for j, (a, sz) in enumerate(free):         # ПЛОТНАЯ укладка: самый тесный подходящий
+                if sz < b['size']:
+                    continue
+                if best < 0 or sz < free[best][1]:
+                    best = j
+            if best < 0:
+                continue
+            placed[best].append(b)
+            free[best][0] += b['size']; free[best][1] -= b['size']
+            if b['above']:
+                above += b['net']
+            else:
+                below += b['net']
+        # конец нижнего региона: снятое ниже ALIGN'а — байт за байт; снятое выше сначала уходит
+        # в добивку и отыгрывается только страницами
+        delta = -below - above + ((pad0 + above) % amod) - pad0 if lastbig >= 0 else -below - above
+        return placed, below, above, delta
+
+    tries = [lay(y) for y in [None] + [(-pad0) % amod + k * amod for k in range(12)]]
+    placed, below, above, delta = min(tries, key=lambda r: (r[3], -(r[1] + r[2])))
+    moved = sum(b['size'] for lst in placed for b in lst)
+    nblk = sum(len(x) for x in placed)
+    if not nblk:
+        return src, 0, 0, ''
+    # ---- вынести блоки ----
+    drop, stubs = set(), {}
+    for lst in placed:
+        for b in lst:
+            drop.update(range(b['i0'], b['iend']))
+            if b['stub']:                              # оставить переход на уехавший блок
+                stubs[b['i0']] = '        jp %s   ; блок уехал в дыру вне картинки' % b['name']
+    out = ['', '; ==== ДЫРЫ ВНЕ КАРТИНКИ: строки 224..255/0..31 столбцов плоскости 1 (буфер) ====',
+           '; Туда не пишет ни рендер, ни постолбцовая clear_scrn_buffer (замер holescan_vec.js),',
+           '; на экране они всегда чёрные. Здесь лежат мелкие процедуры нижнего региона.']
+    for j, (a, sz) in enumerate(holes):
+        if not placed[j]:
+            continue
+        out.append('        ORG %#06x   ; дыра %d Б' % (a, sz))
+        for b in placed[j]:
+            out += [lines[i] for i in range(b['i0'], b['iend'])]
+        out.append('        ASSERT $ <= %#06x   ; дыра %#06x (%d Б) не должна переполниться' % (a + sz, a, sz))
+    kept = []
+    for i, l in enumerate(lines):
+        if i not in drop:
+            kept.append(l)
+        elif i in stubs:
+            kept.append(stubs[i])
+    ei = next(i for i, l in enumerate(kept) if A8_LOW_END in l)
+    desc = ('увезено %d Б в %d процедур (ниже ALIGN %d Б, выше %d Б), нижний регион %+d Б'
+            % (moved, nblk, below, above, delta))
+    if os.environ.get('A8_HOLE_DEBUG'):
+        for j, (a, sz) in enumerate(holes):
+            for b in placed[j]:
+                print('   %-28s %3d Б -> %#06x%s%s' % (b['name'], b['size'], a,
+                      ' (+jp)' if b['stub'] else '', ' [выше ALIGN]' if b['above'] else ''),
+                      file=sys.stderr)
+    return '\n'.join(kept[:ei + 1] + out + kept[ei + 1:]), moved, nblk, desc
 
 
 # ============================ склейка Alien 8 ============================
@@ -1868,10 +2190,16 @@ def main():
     # Сами ветки транслятора теперь падают ассертом; это — последняя проверка по тексту.
     assert 'UNHANDLED' not in src, 'транслятор уронил команду в комментарий:\n  ' + \
         '\n  '.join(l.strip() for l in src.split('\n') if 'UNHANDLED' in l)
+    hole_desc = None
+    if target == 'vec':
+        # ПОСЛЕДНИМ шагом: текст уже окончательный (трансляция, нативные процедуры, звук,
+        # IX-хелперы), поэтому длины считаются по тому же тексту, что уйдёт в ассемблер.
+        src, hmoved, hblk, hole_desc = a8_pack_holes(src, A8_HOLES, A8_HOLE_BYTES, A8_HOLE_SKIP)
     open(outp, 'w', encoding='utf-8').write(src)
     print(f'{inp} -> {outp} (цель {target}); IX-хелперов {len(_ix_used)}; exx-пар {exx_pairs}'
           + (f'; ограничитель темпа: {pace_desc}' if pace_desc else '')
-          + (f'; di-блоки: {dib_desc}' if dib_desc else ''))
+          + (f'; di-блоки: {dib_desc}' if dib_desc else '')
+          + (f'; дыры вне картинки: {hole_desc}' if hole_desc else ''))
 
 
 if __name__ == '__main__':
