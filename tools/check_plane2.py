@@ -48,16 +48,19 @@ def vars_span(lst):
 
 
 def check_bytes(lst, vs):
-    hud, dead = [], []
+    hud, dead, invars = [], [], False
     for line in open(lst, encoding='latin-1'):
+        ml = RE_L.match(line)
+        if ml and ml.group(2) in ('seed_1', 'a8_vars_end'):
+            invars = ml.group(2) == 'seed_1'   # ИСКЛЮЧЕНИЕ ПО ТЕКСТУ, а не по адресам: чужой
+        if invars:                             # блок, лёгший поверх переменных, обязан краснеть
+            continue
         m = RE_B.match(line)
         if not m:
             continue
         a = int(m.group(1), 16)
         for k in range(len(m.group(2).split())):
             b = a + k
-            if vs and vs[0] <= b < vs[1]:      # переменные игры — исключение ДО varmove
-                continue
             if in_hud(b):
                 hud.append((b, line.rstrip()[:100]))
             if VARS[0] <= b < VARS[1]:
@@ -83,25 +86,31 @@ def check_walk(lst, asm, vs):
     if at is None:
         print("check_plane2 --walk: счёт адресов сбился (неизвестная инструкция)")
         return 1
-    bad, occupied = [], 0
+    hud, dead, occupied, invars = [], [], 0, False
     for i, a in enumerate(at):
-        if a is None or i + 1 >= len(at) or at[i + 1] is None or at[i + 1] <= a:
+        ml = re.match(r'^(seed_1|a8_vars_end):', lines[i])
+        if ml:                                  # ИСКЛЮЧЕНИЕ ПО ТЕКСТУ, а не по адресам:
+            invars = ml.group(1) == 'seed_1'    # чужой блок поверх переменных обязан краснеть
+        if invars or a is None or i + 1 >= len(at) or at[i + 1] is None or at[i + 1] <= a:
             continue
         m = t._H_ANYLBL.match(lines[i])
         code = ' '.join(t._nocom(lines[i][m.end():] if m else lines[i]).split())
         if re.match(r'(?i)^(ALIGN|ORG)\b', code):   # добивка и переезд — не код и не данные
             continue
         for b in range(a, at[i + 1]):
-            if vs and vs[0] <= b < vs[1]:
-                continue
+            if VARS[0] <= b < VARS[1]:
+                dead.append((b, lines[i].strip()[:70]))
             if in_hud(b):
-                bad.append((b, lines[i].strip()[:70]))
+                hud.append((b, lines[i].strip()[:70]))
             elif PLANE[0] <= b < PLANE[1]:
                 occupied += 1
     rc = 0
-    if bad:
+    for name, bad in (("ПОЛОСУ HUD ЗАНИМАЮТ", hud),
+                      ("0xC800..0xCFFF (переезд переменных) ЗАНИМАЮТ", dead)):
+        if not bad:
+            continue
         rc = 1
-        print("check_plane2 --walk: ПОЛОСУ HUD ЗАНИМАЮТ %d байт (первый %04X):" % (len(bad), bad[0][0]))
+        print("check_plane2 --walk: %s %d байт (первый %04X):" % (name, len(bad), bad[0][0]))
         for b, txt in bad[:5]:
             print("   %04X  %s" % (b, txt))
     # сверка счёта длин с адресами листинга — им же считает раскладчик
