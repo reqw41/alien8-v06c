@@ -1162,11 +1162,8 @@ def _linear_to_col(n):
 def glue(src):
     """Правки исходника ZX под Вектор. Вызывается ДО трансляции в i8080."""
     # ---------------- раскладка ----------------
-    src = _sub(src, r'^        ORG 0x4000\nzxvram:\n        DS 0x1800\n',
-               "zxvram:         equ zxaram - 0x1700   ; база для calc_attrib_addr; сам битмап на Векторе не нужен\n",
-               'zxvram')
-    src = _sub(src, r'^        ORG 0x5800\nzxaram:',
-               "        ORG %#06x   ; мусорное ОЗУ атрибутов ZX в защитной зоне\nzxaram:" % (A8_GUARD,), 'zxaram')
+    # сегментов zxvram/zxaram уже нет (a8_cut_attrs): обе оставшиеся ссылки на zxvram —
+    # loc_CE60 и update_screen — снимаются ниже, и ни одна не доживает до ассемблера
     src = _sub(src, r'^        ORG 0x5B00\nseed_1:',
                "        ORG %#06x\nseed_1:" % A8_VARS, 'переменные')
     # конец блока переменных (бывший адрес font) — ограничитель «конец таблицы объектов»
@@ -1253,9 +1250,8 @@ def glue(src):
     # Единственные места, где оригинал красит ВЕСЬ экран: clr_attr (0x42, clear_scrn и экран
     # «RE-PROGRAMMING») и fill_attr из colour_something (цвет комнаты). Ровно они и обязаны
     # менять палитру — тогда цвет встаёт там же, где на ZX, без отдельных крючков по местам.
-    src = _sub(src, r'^fill_attr:\n        ld e, a\n',
-               "fill_attr:\n        ld e, a\n"
-               "        call vec_set_pal   ; Вектор: заливка атрибутов = смена палитры (A = атрибут)\n",
+    src = _sub(src, r'^fill_attr:\n        ret   ; Вектор: атрибутов ZX нет[^\n]*\n',
+               "fill_attr:\n        jp vec_set_pal   ; Вектор: заливка атрибутов = смена палитры (A = атрибут)\n",
                'fill_attr: палитра')
 
     # ---------------- ЭКРАН: старые процедуры долой ----------------
