@@ -229,6 +229,32 @@ MUTS = [
          file="tools/a8_vec.py",
          old="        ld (ps_fix+1), a\n",
          new="        ; ПОРЧА: SP за непрочитанный хвост не двигаем\n"),
+    dict(name="varalign", gate="asmcheck",
+         why="база переменных сдвинута на 32 (кратна 32, но НЕ 256). Сборка обязана упасть по "
+             "ASSERT'у: upd_42/43 берут случайность из младшего байта указателя записи "
+             "(push ix/pop bc/ld a,c/rrca/and 0x10), и сдвиг базы переворачивает поворот у всех "
+             "объектов с нечётным номером. ЗАМЕРЕНО, что без ASSERT'а это стоит 5 красных комнат "
+             "из 128 (48, 60, 79, 97, 247), а ШЕСТЬ гейтовых сценариев zxpix по 600 итераций "
+             "остаются ЗЕЛЁНЫМИ — то есть ловит это только ассемблер или обход всех комнат",
+         file="tools/a8_vec.py",
+         old="A8_VARS    = ((A8_PLANE0 - A8_VARSLEN) // 256) * 256        # 0x7800",
+         new="A8_VARS    = ((A8_PLANE0 - A8_VARSLEN) // 256) * 256 + 32   # ПОРЧА: кратно 32, не 256"),
+    dict(name="plane2", gate="regions",
+         why="верхний регион кода начат на страницу ниже (0xD000 -> 0xCF00): 256 байт кода ложатся "
+             "в плоскость 2, которая нужна под селектор белого HUD. spillcheck этого НЕ ВИДИТ — "
+             "в лежащий код никто не пишет, — а на экране он побелит точки поля. Судит только "
+             "a8_regions.py по листингу",
+         file="tools/a8_vec.py",
+         old="A8_UPPER   = 0xD000     # верхний регион (кратен странице)",
+         new="A8_UPPER   = 0xCF00     # ПОРЧА: код в плоскости 2"),
+    dict(name="spresv", gate="spcheck",
+         why="буфер под стеком урезан с 256 до 32 байт: замеренная глубина (44 Б на ходьбе, 68 Б "
+             "на обходе комнат) в него не влезает, то есть стек сел бы на код нижнего региона. "
+             "Ассемблер этого не видит — ASSERT потолка кода при этом ЗЕЛЁНЫЙ, кода там ещё "
+             "2 КБ свободных, — видит только замер глубины",
+         file="tools/a8_vec.py",
+         old="A8_SP_RESV = 0x100      # буфер под стеком.",
+         new="A8_SP_RESV = 0x20       # ПОРЧА: буфер под стеком."),
     dict(name="sfx", gate="aycheck",
          why="период шума эффекта 1 маскируется 0x3F вместо 0x1F: R6 расходится с моделью MSX",
          file="tools/a8_sound_ay.py",
@@ -288,6 +314,31 @@ def gate_result(gate, env=None):
                 if r.returncode:
                     return r.returncode, ("hot=%s %s: " % (hot, tag)) + (r.stdout + r.stderr)[-300:]
         return 0, "все шесть прогонов (2 сборки x 3 сценария) зелёные"
+    if gate == "asmcheck":
+        # ГЕЙТ — САМ АССЕМБЛЕР. Порча обязана уронить сборку по ASSERT'у, а не просто
+        # «как-нибудь»: код возврата тут общий у всего build.sh, поэтому вердикт выносится
+        # по слову ASSERT в выводе sjasmplus.
+        b = build("vec", env)
+        out = b.stdout + b.stderr
+        rc = 1 if (b.returncode and re.search(r'(?i)assert', out)) else 0
+        return rc, out[-400:]
+    if gate == "regions":
+        b = build("vec", env)
+        if b.returncode:
+            return b.returncode, (b.stdout + b.stderr)[-400:]
+        r = run(["python3", "tools/a8_regions.py", "build/alien8_vec.lst"], env)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
+    if gate == "spcheck":
+        # ГЛУБИНА СТЕКА против зарезервированного под ним буфера (стенд берёт его размер
+        # из ASSERT'а листинга). Сценарий ходьбы в стартовой комнате: 44 Б — этого хватает,
+        # чтобы порча «буфер 32 Б» покраснела, а обход 128 комнат (68 Б) стоил бы 2.5 минуты.
+        b = build("vec", env)
+        if b.returncode:
+            return b.returncode, (b.stdout + b.stderr)[-400:]
+        e = dict(env or {}); e["A8_IRQDROP"] = "1"
+        r = run(["node", "tools/spcheck_vec.js", "build/alien8_vec.r0m", "build/alien8_vec.sld",
+                 "600", os.path.join(STAND, "inputs_alive.txt")], e)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "spill":
         # ДВЕ СБОРКИ. 1) обычная: в 0xC000-0xC7FF не должно попасть ни байта (страницы плоскости 2
         # отданы под селектор цветного HUD). 2) A8_PSCW=test, где край объявлен столбцом 30 и клип
