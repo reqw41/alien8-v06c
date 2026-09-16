@@ -212,6 +212,15 @@ MUTS = [
              "    h.append((base + (pages - 1) * 256 + 224, 32))\n",
          new="    h += [(base + c * 256 + 200, 64) for c in range(pages - 1)]\n"
              "    h.append((base + (pages - 1) * 256 + 200, 32))\n"),
+    dict(name="plane2", gate="check_plane2",
+         why="под код отдана половина полосы HUD: раскладчик считает панель полосой 0x30..0x3F "
+             "вместо 0x20..0x3F, и в окна попадают смещения 0x20..0x2F каждой страницы "
+             "плоскости 2. Ассемблер такое пропускает молча (ASSERT'ы окон целы, ORG законны), "
+             "картинка и темп не меняются вовсе — панели-то ещё нет; ловит только check_plane2, "
+             "он судит по ЛИСТИНГУ, где лежит код",
+         file="tools/a8_z80_to_8080.py",
+         old="A8_HUD_LO, A8_HUD_HI = 0x20, 0x3F        # полоса панели в каждой странице плоскости 2\n",
+         new="A8_HUD_LO, A8_HUD_HI = 0x30, 0x3F        # ПОРЧА: полоса вдвое уже\n"),
     dict(name="spill", gate="spill",
          why="очистка буфера идёт на столбец дальше края (clear_scrn_buffer: `ld b, 32` -> 33): "
              "192 записи за плоскость 1, в страницу 0xC000. ЭТО ВИДИТ ТОЛЬКО spillcheck: картинка "
@@ -247,6 +256,7 @@ INBUILD = {
     "check_ixflags": re.compile(r'check_ixflags: чтений испорченного переноса (\d+)'),
     "check_djnz":   re.compile(r'check_djnz: чтений флагов после djnz (\d+)'),
     "check_plane1": re.compile(r'check_plane1: В КАРТИНКЕ БУФЕРА (\d+) байт'),
+    "check_plane2": re.compile(r'check_plane2: В ПОЛОСЕ HUD (\d+) байт'),
 }
 
 

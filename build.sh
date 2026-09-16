@@ -32,6 +32,7 @@ elif [ "$TARGET" = "vec" ]; then
   python3 tools/check_ixflags.py build/alien8_vec.asm
   python3 tools/check_djnz.py build/alien8_vec.asm
   python3 tools/check_plane1.py build/alien8_vec.lst --walk build/alien8_vec.asm
+  python3 tools/check_plane2.py build/alien8_vec.lst --walk build/alien8_vec.asm
   ls -la build/alien8_vec.r0m
 else
   echo "неизвестная цель: $TARGET"; exit 1
