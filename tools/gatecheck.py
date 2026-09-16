@@ -65,6 +65,15 @@ HUDSCEN = [('комната 19 (старт)', {'_iters': '40'}, []),
            ('меню', {'_iters': '0', 'A8HS_FRAMES': '260'}, ['--nomask']),
            ('GAME OVER', {'_iters': '40', 'A8HS_JP': 'game_over@400'}, ['--nomask'])]
 
+# ГЕЙТ ПЕРЕХОДОВ (плёнка): НАСТОЯЩАЯ дорога гибели в комнате 137 — сценарий стенда ZX плюс
+# A8HS_DIE (положить последнюю жизнь на 20-й итерации), дальше своим ходом: GAME OVER ->
+# рейтинг -> клавиша -> RE-PROGRAMMING (сборка робота) -> меню -> новая игра. Прыжков на метки
+# нет. build/keys_go.txt пишется гейтом: отпустить всё на 700-м кадре (сценарий оставляет
+# клавишу нажатой, и loc_B7AE ждал бы отпускания вечно) и дальше жать «0».
+HUDFILM = dict(dirn='build/gate_film', keys='build/keys_go.txt',
+               env={'A8ROOM': '137', 'A8HS_DIE': '20', 'A8HS_MAXF': '2600',
+                    'A8HS_FILMFR': '300,2600,20'}, inputs='inputs_death137.txt', iters='400')
+
 NOBJSCEN = [('покой', 'inputs_idle.txt', None, '60'),
             ('прогулка', 'inputs_walk.txt', None, '600'),
             ('гибель в соседней', 'inputs_death.txt', None, '600'),
@@ -182,10 +191,10 @@ MUTS = [
          file="tools/a8_vec.py",
          old='               "        call vec_wipe0   ; Вектор: экран в ноль ДО смены палитры\\n"\n'
              '               "        call colour_something   ; fill_attr -> палитра новой комнаты\\n"\n'
-             '               "        call vec_palwait   ; палитра встаёт на ЧЁРНОМ экране, до update_screen\\n",\n',
+             '               "        call vec_palwait   ; палитра встаёт на ЧЁРНОМ экране, до update_screen\\n"\n',
          new='               "        call colour_something   ; ПОРЧА: палитра до стирания\\n"\n'
              '               "        call vec_palwait\\n"\n'
-             '               "        call vec_wipe0\\n",\n'),
+             '               "        call vec_wipe0\\n"\n'),
     dict(name="tune", gate="tunecheck",
          why="команда END потока нот не распознаётся (cp 7 -> cp 8): мелодия не кончается",
          file="tools/a8_sound_ay.py",
@@ -278,6 +287,19 @@ MUTS = [
          file="tools/a8_vec.py",
          old="vec_hudcols:\tDB\t\t0xC4, 2, 56, 8",
          new="vec_hudcols:\tDB\t\t0xC4, 2, 60, 8   ; ПОРЧА: зона сдвинута на 4 строки"),
+    dict(name="hudat", gate="hudfilm",
+         why="маска белого HUD ставится в ОБЩЕЙ точке блока (loc_A724) вместо ветки с панелью "
+             "(A8_HUD_AT: panel -> common). Через loc_A724 проходят ДВЕ дороги, и вторая — "
+             "loc_A741, флаг `byte_5B24 != 0` — это экран RE-PROGRAMMING (сборка робота после "
+             "GAME OVER): панели там нет, colour_something не вызывается, на ZX весь экран "
+             "остаётся ярко-красным от clr_attr. Маска белила рамку — ЭТО ТОТ САМЫЙ ДЕФЕКТ, "
+             "который владелец увидел на MiSTer 2026-09-16. ЗАМЕР НЕВАКУУМНОСТИ: при этой "
+             "порче ЗЕЛЁНЫЕ и zxpix, и локстеп, и roomsweep, и одиночный hudcolor по меню, "
+             "GAME OVER и игровой комнате — краснеет ТОЛЬКО плёнка (12 кадров из 106, "
+             "466 точек рамки покрашены белым пером)",
+         file="tools/a8_vec.py",
+         old="A8_HUD_AT = os.environ.get('A8_HUD_AT', 'panel')",
+         new="A8_HUD_AT = os.environ.get('A8_HUD_AT', 'common')   # ПОРЧА: маска на обеих дорогах"),
     dict(name="spresv", gate="spcheck",
          why="буфер под стеком урезан с 256 до 32 байт: замеренная глубина (44 Б на ходьбе, 68 Б "
              "на обходе комнат) в него не влезает, то есть стек сел бы на код нижнего региона. "
@@ -374,6 +396,32 @@ def gate_result(gate, env=None):
             if r.returncode:
                 return r.returncode, (tag + ": ") + (r.stdout + r.stderr)[-300:]
         return 0, "четыре экрана: знакоместа одноцветны, маска стоит в комнатах и погашена вне их"
+    if gate == "hudfilm":
+        # ПЛЁНКА: маска белого HUD на КАЖДОМ кадре перехода. Одиночный снимок сюда не достаёт —
+        # дефект живёт РОВНО между гашением и показом (замер: при A8_HUD_AT=common одиночные
+        # hudcolor по меню, GAME OVER и комнате ЗЕЛЁНЫЕ, а плёнка краснеет 12 кадрами).
+        b = build("vec", env)
+        if b.returncode:
+            return b.returncode, (b.stdout + b.stderr)[-400:]
+        d = os.path.join(ROOT, HUDFILM['dirn'])
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        with open(os.path.join(ROOT, HUDFILM['keys']), 'w') as fh:
+            for k in ('z', 'x', 'a', 'q', 'space', '0', '1', '2', '3'):
+                fh.write('700 %s up\n' % k)
+            for fr in range(760, 3000, 80):
+                fh.write('%d 0 down\n%d 0 up\n' % (fr, fr + 24))
+        e = dict(env or {})
+        e.update(HUDFILM['env'])
+        e['A8HS_KEYS'] = HUDFILM['keys']
+        e['A8HS_INPUTS'] = os.path.join(STAND, HUDFILM['inputs'])
+        e['A8HS_FILM'] = os.path.join(HUDFILM['dirn'], 'f')
+        r = run(["node", "tools/hudshot_vec.js", "build/alien8_vec.r0m", "build/alien8_vec.sld",
+                 HUDFILM['iters'], "build/gate_film.png"], e)
+        if r.returncode:
+            return r.returncode, "плёнка не снялась: " + (r.stdout + r.stderr)[-300:]
+        r = run(["python3", "tools/hudfilm.py", HUDFILM['dirn']], env)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "regions":
         b = build("vec", env)
         if b.returncode:

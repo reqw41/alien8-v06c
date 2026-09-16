@@ -3,6 +3,9 @@
 
   python3 tools/hudcolor.py build/hud_room19.txt            # экран С панелью
   python3 tools/hudcolor.py --nomask build/hud_menu.txt     # экран БЕЗ панели: маска погашена
+  python3 tools/hudcolor.py --nofill --quiet <кадр>         # кадр ПЕРЕХОДА (см. tools/hudfilm.py):
+        # там картинка нарисована наполовину (идёт vec_wipe0 или update_screen), и требовать
+        # «зона заполнена» нельзя — маска ложится между стиранием и показом
 
 Три проверки, и каждая ловит свой класс дефектов:
 
@@ -23,7 +26,8 @@
    белит точки поля, и проверка 1 его НЕ ПОЙМАЕТ, если он покрасил связную компоненту целиком.
    Зоны читаются из таблицы `vec_hudcols` в tools/a8_vec.py — гейт и код не могут разойтись.
 
-3. ЗОНЫ ЗАПОЛНЕНЫ ЦЕЛИКОМ (или пусты целиком при --nomask). vec_hud_mask кладёт зону
+3. ЗОНЫ ЗАПОЛНЕНЫ ЦЕЛИКОМ (или пусты целиком при --nomask; `--nofill` снимает эту проверку).
+   vec_hud_mask кладёт зону
    прямоугольником, vec_hud_off гасит; половина зоны — это оборванный обход таблицы.
    --nomask — для экранов без панели (меню, GAME OVER, финал, RE-PROGRAMMING): там маска
    ОБЯЗАНА быть погашена, иначе рамка и текст красятся пером HUD.
@@ -55,23 +59,27 @@ def zones(path=A8VEC):
 
 
 def load(path):
-    pl, pal = {0: {}, 1: {}, 2: {}, 3: {}}, None
+    """-> (плоскости, палитра, флаги порта). Строки `state` может не быть (одиночный снимок)."""
+    pl, pal, st = {0: {}, 1: {}, 2: {}, 3: {}}, None, {}
     for l in open(path):
         q = l.rstrip('\n').split()
         if not q:
+            continue
+        if q[0] == 'state':
+            st = {q[i]: int(q[i + 1]) for i in range(1, len(q) - 1, 2)}
             continue
         if q[0] == 'pal':
             pal = [int(t, 16) for t in q[1:]]
             continue
         pl[int(q[1][1])][int(q[0])] = q[2]
     assert pal, 'в дампе нет строки pal (нужен свежий hudshot_vec.js)'
-    return pl, pal
+    return pl, pal, st
 
 
 def main(argv):
-    nomask = '--nomask' in argv
+    nomask, nofill, quiet = '--nomask' in argv, '--nofill' in argv, '--quiet' in argv
     path = [a for a in argv if not a.startswith('-')][0]
-    pl, pal = load(path)
+    pl, pal, _ = load(path)
     p0, p1, p2 = pl[0], pl[1], pl[2]
     zs = zones()
     bad = 0
@@ -105,7 +113,7 @@ def main(argv):
         print('!!! ПЛОСКОСТЬ 2 ВНЕ ЗОН: %d точек, первая x=%d строка=%d (столбец %d)'
               % (len(stray), stray[0][0], stray[0][1], stray[0][0] // 8))
     want = '.' if nomask else '#'
-    for c, w, r0, h in zs:
+    for c, w, r0, h in zs if not nofill else ():
         wrong = [(x, r) for r in range(r0, r0 + h) for x in range(c * 8, (c + w) * 8)
                  if p2.get(r, '.' * 256)[x] != want]
         if wrong:
@@ -114,10 +122,11 @@ def main(argv):
                   % (c, c + w - 1, r0, r0 + h - 1, len(wrong),
                      'погашено' if nomask else 'закрашено', wrong[0][0], wrong[0][1]))
     n2 = sum(s[x] == '#' for r, s in p2.items() if PIC[0] <= r <= PIC[1] for x in range(256))
-    print('%s: точек картинки %d в %d знакоместах, разноцветных %d; точек плоскости 2 в '
-          'картинке %d, зон %d (%s)'
-          % (os.path.basename(path), npix, len(cells), mixed, n2, len(zs),
-             'маска погашена' if nomask else 'маска на месте'))
+    if not (quiet and not bad):
+        print('%s: точек картинки %d в %d знакоместах, разноцветных %d; точек плоскости 2 в '
+              'картинке %d, зон %d (%s)'
+              % (os.path.basename(path), npix, len(cells), mixed, n2, len(zs),
+                 'маска погашена' if nomask else 'маска на месте'))
     return 1 if bad else 0
 
 

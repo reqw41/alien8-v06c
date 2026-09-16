@@ -12,8 +12,17 @@
 //   A8HS_DUMP=файл  текстовый дамп плоскостей (строка = "<строка памяти> p<N> <256 символов>")
 //                   и палитры; A8HS_ROWS=r0,r1 — какие строки ПАМЯТИ (по умолчанию 32,223)
 //   A8HS_SCALE=<n>  масштаб PNG (2), A8HS_PLANE=0..3 — показать одну плоскость ч/б
+//   A8HS_FILM=префикс       ПЛЁНКА: дамп плоскостей на КАЖДОМ кадре окна A8HS_FILMFR=a,b[,шаг]
+//                   в <префикс>_<кадр>.txt (формат A8HS_DUMP). Так ловятся дефекты ПЕРЕХОДОВ:
+//                   один кадр «после» о том, что было в середине, не говорит ничего
 //   A8HS_LIVES=1    бессмертие (жизни держатся на 5): длинные прогоны
 //   A8HS_KEYS=файл  расписание клавиш по КАДРАМ, формат tools/shot_vec.js
+//   A8HS_INPUTS=файл  расписание клавиш по ИТЕРАЦИЯМ — файлы стенда ZX (inputs_death137.txt
+//                   и т.п.), тот же сдвиг на итерацию, что у zxpix_vec.js
+//   A8HS_MAXF=<кадров> предел по КАДРАМ (на экранах GAME OVER/меню итерации стоят, и предел
+//                   по итерациям сам не сработает)
+//   A8HS_DIE=<итер> положить lives = 0 на этой итерации: гибель уводит в НАСТОЯЩИЙ game_over
+//                   и дальше на экран RE-PROGRAMMING — вся дорога своя, без прыжка A8HS_JP
 //
 // Экран Вектора: адрес байта = плоскость + (столбец<<8) + строка памяти; строка памяти 255 —
 // ВЕРХ кадра. Картинка порта лежит в строках 32..223 (строка = 223 - строка ZX).
@@ -60,7 +69,36 @@ if(process.env.A8HS_KEYS&&fs.existsSync(process.env.A8HS_KEYS))
   for(const l of fs.readFileSync(process.env.A8HS_KEYS,"utf8").split("\n")){
     const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);
     if(m)(plan[+m[1]]=plan[+m[1]]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
+// Расписание стенда ZX по ИТЕРАЦИЯМ (тот же сдвиг +1, что в zxpix_vec.js).
+const inputs={};
+if(process.env.A8HS_INPUTS&&fs.existsSync(process.env.A8HS_INPUTS))
+  for(const l of fs.readFileSync(process.env.A8HS_INPUTS,"utf8").split("\n")){
+    const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);
+    if(m)(inputs[+m[1]+1]=inputs[+m[1]+1]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
+const DIE=+(process.env.A8HS_DIE||0);
 const ow=memory.write.bind(memory);
+const rdb=a=>memory.bytes[memory.tobank(a&0xffff)];
+const PLANES=[0x8000,0xA000,0xC000,0xE000];
+// Строка `state` — ПОРТОВЫЕ ФЛАГИ, по которым гейт узнаёт экран без панели ТОЧНО, а не на глаз:
+// byte_5B24 != 0 — экран «RE-PROGRAMMING» (сборка робота после GAME OVER): игровой цикл уходит
+// на loc_A741 в обход sub_AD66, display_panel и colour_something, то есть панели на экране нет
+// и атрибуты ZX там остались от clr_attr (0x42).
+function dumpPlanes(file,r0,r1){
+  const out=["state b5B24 "+rdb(L.byte_5B24)+" rsi "+rdb(L.render_status_info)
+             +" attr "+rdb(L.curr_room_attrib)+" lives "+rdb(L.lives),
+             "pal "+[...Array(16)].map((_,i)=>rdb(L.vec_pal+i).toString(16).padStart(2,"0")).join(" ")];
+  for(let mrow=r1;mrow>=r0;mrow--){
+    const t=["","","",""];
+    for(let col=0;col<32;col++)for(let pl=0;pl<4;pl++){
+      const b=rdb(PLANES[pl]+(col<<8)+mrow);
+      for(let bit=7;bit>=0;bit--)t[pl]+=((b>>bit)&1)?"#":".";}
+    for(let pl=0;pl<4;pl++)out.push(String(mrow).padStart(3)+" p"+pl+" "+t[pl]);}
+  fs.writeFileSync(file,out.join("\n")+"\n");}
+// ПЛЁНКА: кадры окна пишутся ПРЯМО ПО ХОДУ прогона — состояние экрана в середине перехода
+// иначе не достать (к концу его уже перерисовали).
+const FILM=process.env.A8HS_FILM;
+let FLO=0,FHI=-1,FST=1,filmN=0;
+if(FILM){const m=(process.env.A8HS_FILMFR||"0,1000000").split(",");FLO=+m[0];FHI=+m[1];FST=+(m[2]||1);}
 let phase="menu",iter=0;
 memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){ow(L.seed_1,0x34,false);ow(L.seed_1+1,0x12,false);
@@ -68,9 +106,13 @@ memory.write=function(a,w,s){a&=0xffff;
   if(process.env.A8ROOM&&phase==="init"&&(a===L.graphic_objs_tbl+8||a===L.graphic_objs_tbl+40))
     w=+process.env.A8ROOM;
   if(a===ROOM&&phase==="init"&&w!==0){phase="game";key("0",false);}
-  if(a===SEED2HI&&phase==="game"){iter++;if(process.env.A8HS_LIVES)ow(L.lives,5,false);}
+  if(a===SEED2HI&&phase==="game"){iter++;
+    if(process.env.A8HS_LIVES)ow(L.lives,5,false);
+    if(DIE&&iter===DIE)ow(L.lives,0,false);          // последняя жизнь: следующая гибель = GAME OVER
+    for(const [k,d] of (inputs[iter]||[]))key(k,d);}
   return ow(a,w,s);};
-function frame(f){for(const [k,d] of (plan[f]||[]))key(k,d);v06c.oneInterrupt(true);}
+function frame(f){for(const [k,d] of (plan[f]||[]))key(k,d);v06c.oneInterrupt(true);
+  if(FILM&&f>=FLO&&f<=FHI&&(f-FLO)%FST===0){dumpPlanes(FILM+"_"+String(f).padStart(5,"0")+".txt",32,223);filmN++;}}
 let frames=0;
 for(;frames<60;frames++)frame(frames);
 if(process.env.A8HS_FRAMES){                        // снимок по кадрам: меню, заставка
@@ -81,7 +123,8 @@ if(process.env.A8HS_FRAMES){                        // снимок по кад�
   let guard=0; while(phase!=="game"&&guard++<6000)frame(frames++);
   if(phase!=="game")throw new Error("не дошли до комнаты");
   const it0=iter;
-  while(iter-it0<N&&frames<200000)frame(frames++);
+  const MAXF=+(process.env.A8HS_MAXF||0);       // предел по КАДРАМ: на экране без игры итерации стоят
+  while(iter-it0<N&&frames<200000&&(!MAXF||frames<MAXF))frame(frames++);
 }
 // A8HS_JP=метка[@кадров] — перейти на метку (game_over, финал) и покрутить кадры.
 // Стек как у игры: SP = seed_1 (тот же символический адрес, что в загрузчике порта).
@@ -91,8 +134,7 @@ if(process.env.A8HS_JP){const m=process.env.A8HS_JP.split("@"),lbl=m[0],nf=+(m[1
   for(let f=0;f<nf;f++)frame(frames++);
   console.log(`A8HS_JP: ${lbl}, ${nf} кадров`);}
 
-const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
-const PLANE=[0x8000,0xA000,0xC000,0xE000];
+const rd=rdb, PLANE=PLANES;
 const pal=[];for(let i=0;i<16;i++){const w=rd(L.vec_pal+i);
   pal.push([(w&0x07)<<5,(w&0x38)<<2,(w&0xc0)]);}   // %BBGGGRRR -> RGB
 const palhex=[...Array(16)].map((_,i)=>rd(L.vec_pal+i).toString(16).padStart(2,"0"));
@@ -135,4 +177,5 @@ const ihdr=Buffer.alloc(13);ihdr.writeUInt32BE(IW,0);ihdr.writeUInt32BE(IH,4);ih
 const png=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk("IHDR",ihdr),
   chunk("IDAT",zlib.deflateSync(raw)),chunk("IEND",Buffer.alloc(0))]);
 const out=OUT||"build/hudshot.png";fs.writeFileSync(out,png);
+if(FILM)console.log(`плёнка: ${filmN} кадров -> ${FILM}_*.txt`);
 console.log(`итераций ${iter}, кадров ${frames}, комната ${process.env.A8ROOM||"(старт)"} -> ${out} (${IW}x${IH})`);
