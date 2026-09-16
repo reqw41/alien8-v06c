@@ -202,6 +202,16 @@ MUTS = [
          file="tools/a8_z80_to_8080.py",
          old='    return ["ld a,(hl)"] + _shift_body(op) + ["ld (hl),a", "ld a,(il_a)", "ld hl,(il_tmp2)"]',
          new='    return ["ld a,(hl)"] + [] + ["ld (hl),a", "ld a,(il_a)", "ld hl,(il_tmp2)"]   # ПОРЧА: ячейка (ix+d) не сдвигается'),
+    dict(name="plane1", gate="check_plane1",
+         why="дыры вне картинки сдвинуты со строки 224 на 200: под код отданы строки ВНУТРИ "
+             "картинки (200..223 каждого столбца буфера). Ассемблер такое пропускает — байты "
+             "ложатся, ASSERT'ы дыр целы, — а на первом же кадре рендер их затрёт и нарисует "
+             "мусором. Ловит только check_plane1: он судит по ЛИСТИНГУ, где лежит код",
+         file="tools/a8_z80_to_8080.py",
+         old="    h += [(base + c * 256 + 224, 64) for c in range(pages - 1)]\n"
+             "    h.append((base + (pages - 1) * 256 + 224, 32))\n",
+         new="    h += [(base + c * 256 + 200, 64) for c in range(pages - 1)]\n"
+             "    h.append((base + (pages - 1) * 256 + 200, 32))\n"),
     dict(name="sfx", gate="aycheck",
          why="период шума эффекта 1 маскируется 0x3F вместо 0x1F: R6 расходится с моделью MSX",
          file="tools/a8_sound_ay.py",
@@ -219,6 +229,7 @@ INBUILD = {
     "check_i8080":  re.compile(r'check_i8080: инструкций \d+, Z80-only (\d+)'),
     "check_ixflags": re.compile(r'check_ixflags: чтений испорченного переноса (\d+)'),
     "check_djnz":   re.compile(r'check_djnz: чтений флагов после djnz (\d+)'),
+    "check_plane1": re.compile(r'check_plane1: В КАРТИНКЕ БУФЕРА (\d+) байт'),
 }
 
 

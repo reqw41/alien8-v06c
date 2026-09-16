@@ -990,6 +990,21 @@ _H_SENS = re.compile(r'(?i)(?:\b(?:high|low)\s*\(?\s*([A-Za-z_]\w*))'
                      r'|(?:(?:&|\||\^|\*|/|%|<<|>>|-)\s*([A-Za-z_]\w*))')
 
 
+def _nocom(s):
+    """Снять комментарий, УВАЖАЯ строковые литералы: у Alien 8 есть `DB "CHAMBERS;;;;;;;;; "`
+    (точки — заполнитель строки статуса), и наивный split(';') урезал бы её до одного байта."""
+    q = None
+    for i, ch in enumerate(s):
+        if q:
+            if ch == q:
+                q = None
+        elif ch in '"\'':
+            q = ch
+        elif ch == ';':
+            return s[:i]
+    return s
+
+
 def _db_len(code):
     """Длина строки DB/DW в байтах. Ошибка в меньшую сторону ловится ASSERT'ом дыры при сборке."""
     mn = code.split()[0].upper()
@@ -1035,7 +1050,7 @@ def a8_walk(lines, hi):
     поэтому значения меток `X: equ $` запоминаются на ходу."""
     eqs, syms = {}, {}
     for l in lines:
-        m = re.match(r'^([A-Za-z_]\w*)[: \t]+\s*(?:EQU|equ)\s+(.+)$', l.split(';')[0].strip())
+        m = re.match(r'^([A-Za-z_]\w*)[: \t]+\s*(?:EQU|equ)\s+(.+)$', _nocom(l).strip())
         if m and m.group(2).strip() != '$':
             eqs[m.group(1)] = m.group(2).strip()
 
@@ -1048,9 +1063,11 @@ def a8_walk(lines, hi):
     for i in range(hi + 1):
         l = lines[i]
         m = _H_ANYLBL.match(l)
-        code = ' '.join((l[m.end():] if m else l).split(';')[0].split())
+        body = _nocom(l[m.end():] if m else l)
+        raw = body.strip()          # БЕЗ схлопывания пробелов: `DB "CIRCUITS  HEL"` — 13 байт,
+        code = ' '.join(body.split())   # а схлопнутая строка дала бы 12 (ловушка, найдена --walk)
         at[i] = addr
-        me = re.match(r'^([A-Za-z_]\w*)[: \t]+\s*(?:EQU|equ)\s+\$\s*$', l.split(';')[0].strip())
+        me = re.match(r'^([A-Za-z_]\w*)[: \t]+\s*(?:EQU|equ)\s+\$\s*$', _nocom(l).strip())
         if me:                                          # `метка: equ $` — запомнить адрес
             syms[me.group(1)] = addr
             continue
@@ -1080,11 +1097,11 @@ def a8_walk(lines, hi):
             prev_ix = False
             continue
         if _H_IXDB.match(code) and prev_ix:             # операнд IX-хелпера (1 или 2 байта)
-            addr += _db_len(code)
+            addr += _db_len(raw)
             prev_ix = False
             continue
         if _H_DATA.match(code):
-            addr += _db_len(code)
+            addr += _db_len(raw)
             prev_ix = False
             continue
         if re.search(r'(?i)\bequ\b', code) or _H_SKIP.match(code):
@@ -1135,7 +1152,7 @@ def a8_pack_holes(src, holes, need=-1, exclude=()):
         return src, 0, 0, ''
     lines = src.split('\n')
     end = next(i for i, l in enumerate(lines) if A8_LOW_END in l)
-    nocom = '\n'.join(l.split(';')[0] for l in lines)
+    nocom = '\n'.join(_nocom(l) for l in lines)
     sens = set()
     for l in nocom.split('\n'):
         if re.match(r'(?i)^\s*ASSERT\b', l):           # метка в ASSERT'е: её адрес проверяют
@@ -1148,8 +1165,9 @@ def a8_pack_holes(src, holes, need=-1, exclude=()):
         raw = lines[i]
         m = _H_LBL.match(raw)
         ml = m or _H_ANYLBL.match(raw)
-        body = raw[ml.end():] if ml else raw
-        code = ' '.join(body.split(';')[0].split())    # пробелы схлопнуть: иначе `jp\s+` в _H_TERM
+        body = _nocom(raw[ml.end():] if ml else raw)
+        rawc = body.strip()                            # без схлопывания — для _db_len
+        code = ' '.join(body.split())                  # пробелы схлопнуть: иначе `jp\s+` в _H_TERM
         if m:                                          # отступает назад и «jp nz, x» сойдёт за jp
             cur = {'name': m.group(1), 'i0': i, 'iend': i + 1, 'size': 0, 'ok': True,
                    'low': low, 'after_pad': prev_pad, 'last': ''}
@@ -1169,7 +1187,7 @@ def a8_pack_holes(src, holes, need=-1, exclude=()):
         ixdb = bool(_H_IXDB.match(code)) and prev_ix
         if cur is not None:
             if ixdb:
-                cur['size'] += _db_len(code)   # `db d` (или `db d, n` у il_*_stn) — часть инструкции
+                cur['size'] += _db_len(rawc)   # `db d` (или `db d, n` у il_*_stn) — часть инструкции
                 cur['iend'] = i + 1
             elif _H_HARD.match(code):
                 cur['ok'] = False
@@ -1187,7 +1205,7 @@ def a8_pack_holes(src, holes, need=-1, exclude=()):
     aligns = []
     for i in range(end):
         ml = _H_ANYLBL.match(lines[i])
-        code = ' '.join((lines[i][ml.end():] if ml else lines[i]).split(';')[0].split())
+        code = ' '.join(_nocom(lines[i][ml.end():] if ml else lines[i]).split())
         if code.upper().startswith('ALIGN') and i < len(at) and at[i] is not None:
             n = int(code.split()[1], 0)
             if n >= 64 and 0x0100 <= at[i] < 0x8000:
