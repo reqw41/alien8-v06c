@@ -87,7 +87,7 @@ def main(argv):
     print('\nvec_hudcols (страница = 0xC0 + столбец, столбцов, первая строка, строк):')
     for off, n, c, w in zones(sets[0]):
         assert 0x20 <= off and off + n - 1 <= 0x3F, (off, n)
-        print('\t\t\t\t\tDB\t\t0x%02X, %d, %d, %d, 0xFF\t; столбцы %d..%d, строки %d..%d'
+        print('\t\t\t\t\tDB\t\t0x%02X, %d, %d, %d\t; столбцы %d..%d, строки %d..%d'
               % (0xC0 + c, w, off, n, c, c + w - 1, off, off + n - 1))
     return bad
 
