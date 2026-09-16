@@ -31,13 +31,18 @@ function joy(...bits){ JOY = JOY_IDLE; for(const b of bits) JOY &= ~b & 0xFF; re
 { const _rd = io.input.bind(io); io.input = p => ((p & 0xFF) === 0x0E ? JOY : _rd(p)); }
 const cpu=new ctx.I8080(memory,io),tape={advance:()=>{},sample:0,reset:()=>{}},v06c=new ctx.Vector06c(cpu,memory,io,ay,tape);
 v06c.bmp=new Uint32Array(576*288);v06c.displayFrame=()=>{};v06c.check_breakpoint=()=>false;v06c.dbg=null;
-memory.init_from_array(new Uint8Array(fs.readFileSync(ROM)).subarray(0,0x10000),0);memory.detach_boot&&memory.detach_boot();
+// БАЗА СТЕКА — ИЗ ОБРАЗА (загрузчик 0x0000: `di` + `ld sp,imm`), а не числом: она переехала
+// вместе с переменными в конец нижнего региона и переедет ещё.
+const IMG = new Uint8Array(fs.readFileSync(ROM)).subarray(0, 0x10000);
+if (IMG[0] !== 0xF3 || IMG[1] !== 0x31) throw new Error("загрузчик не `di / ld sp,imm` — база стека не читается");
+const SPBASE = IMG[2] | (IMG[3] << 8);
+memory.init_from_array(IMG,0);memory.detach_boot&&memory.detach_boot();
 const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
-cpu.pc=0;cpu.sp=0x8000;cpu.iff=false;
+cpu.pc=0;cpu.sp=SPBASE;cpu.iff=false;
 for(let f=0;f<120;f++)v06c.oneInterrupt(true);     // загрузка палитры, меню нарисовано
 // ПАРКОВКА: дальше крутится только обработчик прерывания. 0x0030..0x0032 — дыра перед ORG 0x0038.
 memory.write(0x0030,0xC3,false);memory.write(0x0031,0x30,false);memory.write(0x0032,0x00,false);
-cpu.pc=0x0030;cpu.sp=0x8000;cpu.iff=true;
+cpu.pc=0x0030;cpu.sp=SPBASE;cpu.iff=true;
 const out=[];
 function shot(name,mat){
   for(let r=0;r<8;r++)keyboard.matrix[r]=mat[r];

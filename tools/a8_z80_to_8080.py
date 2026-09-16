@@ -1129,7 +1129,9 @@ A8_HOLE_PLANES = [0xA000]           # плоскость 1 (буфер): её д
 A8_HOLE_BYTES = int(os.environ.get('A8_HOLE_BYTES', '-1'))   # -1 = сколько влезет
 A8_HOLE_SKIP = tuple(x for x in os.environ.get('A8_HOLE_SKIP', '').split(',') if x)
 A8_HOLES = [h for b in A8_HOLE_PLANES for h in a8_holes(b)]
-A8_LOW_END = 'ASSERT $ <= 0x7f00'   # метка конца нижнего региона в собранном тексте
+# Метка конца нижнего региона в собранном тексте. ПО КОММЕНТАРИЮ, а не по адресу: потолок
+# кода (A8_CODE_TOP в a8_vec.py) переехал вместе со стеком и переменными и переедет ещё.
+A8_LOW_END = '; нижний регион не должен дорасти до стека'
 
 
 def a8_pack_holes(src, holes, need=-1, exclude=()):
