@@ -1303,6 +1303,158 @@ def a8_pack_holes(src, holes, need=-1, exclude=()):
     return '\n'.join(kept[:ei + 1] + out + kept[ei + 1:]), moved, nblk, desc
 
 
+# ============ верхний регион в обход полосы HUD (плоскость 2) ============
+# Под селектор БЕЛОГО HUD (как в Knight Lore) отдана плоскость 2, 0xC000..0xDFFF. Панель
+# Alien 8 занимает нижние 32 строки картинки — ZX-строки 160..191, — а буфер Вектора
+# столбцовый: адрес = база + столбец*256 + 32 + Y, Y = 223 - строка ZX. То есть панель
+# лежит в смещениях 0x20..0x3F КАЖДОЙ из 32 страниц плоскости, а не одним куском.
+#
+# Верхний регион кода 0xD000..0xDFFF из-за этого рассыпается на окна: 32 байта в начале,
+# потом по 224 (0xnn40..0xmm1F, через границу страницы) и 192 в конце. Раскладчик режет
+# регион на блоки и раскладывает их по окнам, вставляя ORG; окна задаются списком —
+# после переезда переменных (varmove) к ним добавятся окна страниц 0xC0..0xCF.
+A8_HUD_LO, A8_HUD_HI = 0x20, 0x3F        # полоса панели в каждой странице плоскости 2
+A8_PLANE2 = (0xC000, 0xE000)
+
+# Резать ПЕРЕД этими метками нельзя, хотя формально можно:
+_U_NOCUT = {
+    # Вход в цепочку print_sprite патчится ТОЛЬКО младшим байтом `jp` (`add a, low (loc_D0BB+3)`
+    # в print_sprite, `ld a, low (ps_fixe)` в ps_cw), поэтому pixel_chain_aligned..ps_fix —
+    # ОДИН блок и он обязан целиком уместиться в одной странице (ASSERT'ы на месте).
+    'loc_D0B9': 'цепочка: вход патчится младшим байтом jp',
+    'ps_fixe': 'хвост клипа: ps_cw патчит младший байт ps_jrow',
+}
+_U_ONEPAGE = {'pixel_chain_aligned'}     # блок обязан лежать в ОДНОЙ странице
+_U_DS = re.compile(r'(?i)^DS\b')
+_U_CUTPREV = re.compile(r'(?i)^(ret$|jp\s+(?!nz\b|z\b|nc\b|c\b|po\b|pe\b|p\b|m\b)'
+                        r'|DB\b|DW\b|DS\b|DEFB\b|DEFW\b|ORG\b|ALIGN\b)')
+
+
+def a8_hud_windows(lo, hi):
+    """Разрешённые окна в [lo, hi): всё, кроме полос page+0x20..page+0x3F плоскости 2."""
+    wins, a = [], lo
+    for p in range(lo & ~0xFF, hi, 0x100):
+        if not A8_PLANE2[0] <= p < A8_PLANE2[1]:
+            continue
+        b0, b1 = max(p + A8_HUD_LO, lo), min(p + A8_HUD_HI + 1, hi)
+        if b1 <= b0:
+            continue
+        if b0 > a:
+            wins.append((a, b0 - a))
+        a = max(a, b1)
+    if hi > a:
+        wins.append((a, hi - a))
+    return wins
+
+
+# Окна раскладчика — СПИСОК, а не одна пара границ. Сейчас верхний регион это 0xD000..0xDFFF:
+# страницы 0xC0..0xC7 держит защитная зона спиллов, 0xC8..0xCF — переменные игры (0xC800..0xCF87).
+# После их переезда в нижний регион (ветка varmove) сюда добавятся окна a8_hud_windows(0xC000,
+# 0xD000); A8_HUD_LOW=1 включает их уже сейчас — проверить, что раскладчик берёт окна из списка.
+A8_HUD_WINDOWS = ((a8_hud_windows(0xC000, 0xD000) if os.environ.get('A8_HUD_LOW') else [])
+                  + a8_hud_windows(0xD000, 0xE000))
+
+
+def _u_split(lines, at, i0, i1):
+    """Разбить верхний регион (строки i0..i1) на блоки, которые можно двигать порознь.
+
+    Резать можно ПЕРЕД меткой, если последняя выдающая байты инструкция до неё — безусловный
+    переход/ret, данные или ORG/ALIGN: в такую метку проваливаться неоткуда, все входы в неё
+    по имени. Ячейки `метка: DS n` остаются при своей процедуре. ALIGN, комментарии и пустые
+    строки перед меткой уезжают в НОВЫЙ блок (ALIGN 8 перед vec_kbzx — часть таблицы)."""
+    code, size, emits = {}, {}, {}
+    for i in range(i0, i1):
+        m = _H_ANYLBL.match(lines[i])
+        c = ' '.join(_nocom(lines[i][m.end():] if m else lines[i]).split())
+        code[i] = c
+        pad = c.upper().startswith('ALIGN')
+        size[i] = 0 if pad or at[i] is None or at[i + 1] is None else at[i + 1] - at[i]
+        emits[i] = bool(c) and not pad and not _H_SKIP.match(c) and not re.search(r'(?i)\bequ\b', c)
+    cuts, prev, got = [i0], '', False
+    for i in range(i0 + 1, i1):
+        m = _H_LBL.match(lines[i])
+        if m and got and m.group(1) not in _U_NOCUT and not _U_DS.match(code[i]) \
+                and _U_CUTPREV.match(prev):
+            j = i                                   # ALIGN/комментарии — в новый блок
+            while j > cuts[-1] and (not code[j - 1] or code[j - 1].upper().startswith('ALIGN')
+                                    or lines[j - 1].lstrip().startswith(';')):
+                j -= 1
+            cuts.append(j)
+            got = False
+        if emits[i]:
+            prev, got = code[i], True
+        elif size[i]:
+            got = True
+    blocks = []
+    for k, j in enumerate(cuts):
+        end = cuts[k + 1] if k + 1 < len(cuts) else i1
+        nm = next((_H_LBL.match(lines[x]).group(1) for x in range(j, end) if _H_LBL.match(lines[x])), '?')
+        al = max([int(code[x].split()[1], 0) for x in range(j, end)
+                  if code[x].upper().startswith('ALIGN')] or [1])
+        blocks.append({'name': nm, 'lines': lines[j:end], 'size': sum(size[x] for x in range(j, end)),
+                       'align': al, 'page': nm in _U_ONEPAGE})
+    return blocks
+
+
+def a8_layout_upper(src, windows, mark='ВЕРХНИЙ регион кода', endmark='блок Вектора не должен'):
+    """Разложить верхний регион по окнам между полосами HUD, вставляя ORG между блоками.
+
+    Длины блоков считаются тем же счётом, что у упаковщика дыр (a8_walk/_i8080_len/_db_len);
+    сверка счёта с листингом — tools/check_plane2.py --walk. Порядок блоков свободен: каждый
+    начинается с метки, в которую нельзя провалиться сверху (см. _u_split), а адрес процедуры
+    на скорость i8080 не влияет — ни кэша, ни штрафа за выравнивание у него нет."""
+    lines = src.split('\n')
+    i0 = next(i for i, l in enumerate(lines) if mark in l)
+    i1 = next(i for i, l in enumerate(lines) if endmark in l)
+    at = a8_walk(lines, i1)
+    assert at and at[i1] is not None, 'верхний регион: счёт адресов сбился'
+    blocks = _u_split(lines, at, i0 + 1, i1)
+    wins = [{'a': a, 'end': a + sz, 'cur': a, 'blk': []} for a, sz in windows]
+    # тесная укладка: ограниченные блоки первыми, дальше крупные; окно — самое тесное подходящее
+    for b in sorted(blocks, key=lambda b: (not b['page'], b['align'] == 1, -b['size'], b['name'])):
+        best = None
+        for w in wins:
+            a = (w['cur'] + b['align'] - 1) & ~(b['align'] - 1)
+            if a + b['size'] > w['end']:
+                continue
+            if b['page'] and b['size'] and (a >> 8) != ((a + b['size'] - 1) >> 8):
+                continue
+            if best is None or w['end'] - a - b['size'] < best[0]:
+                best = (w['end'] - a - b['size'], a, w)
+        assert best, ('верхний регион: блок %s (%d Б) не влез ни в одно окно'
+                      % (b['name'], b['size']))
+        _, a, w = best
+        b['at'] = a
+        w['cur'] = a + b['size']
+        w['blk'].append(b)
+    out = ['', '; ==== ВЕРХНИЙ РЕГИОН В ОБХОД ПОЛОСЫ HUD (плоскость 2) ====',
+           '; Панель Alien 8 (ZX-строки 160..191) лежит в смещениях 0x%02X..0x%02X КАЖДОЙ страницы'
+           % (A8_HUD_LO, A8_HUD_HI),
+           '; плоскости 2, поэтому регион разложен по окнам между полосами (a8_layout_upper).']
+    for w in wins:
+        if not w['blk']:
+            continue
+        out.append('        ORG %#06x   ; окно %#06x..%#06x (%d Б)'
+                   % (w['blk'][0]['at'], w['a'], w['end'] - 1, w['end'] - w['a']))
+        for b in w['blk']:
+            out += b['lines']
+        out.append('        ASSERT $ <= %#06x   ; окно %#06x не должно налезть на полосу HUD'
+                   % (w['end'], w['a']))
+    used = sum(b['size'] for b in blocks)
+    free = sum(w['end'] - w['a'] for w in wins) - used
+    desc = ('%d блоков, %d Б в %d окнах из %d, свободно %d'
+            % (len(blocks), used, sum(1 for w in wins if w['blk']), len(wins), free))
+    if os.environ.get('A8_HUD_DEBUG'):
+        for w in wins:
+            print('   окно %#06x..%#06x (%3d Б): свободно %3d' % (w['a'], w['end'] - 1,
+                  w['end'] - w['a'], w['end'] - w['cur']), file=sys.stderr)
+            for b in w['blk']:
+                print('      %#06x %4d Б  %-28s%s%s' % (b['at'], b['size'], b['name'],
+                      ' [одна страница]' if b['page'] else '',
+                      ' [ALIGN %d]' % b['align'] if b['align'] > 1 else ''), file=sys.stderr)
+    return '\n'.join(lines[:i0] + out + lines[i1:]), desc
+
+
 # ============================ склейка Alien 8 ============================
 # Цель `lockstep`: логика 1:1 с оригиналом ZX, вывод заглушен, стенд подаёт
 # байт-оракул mem[seed_2]. Раскладка памяти (код i8080 в раскладку ZX не влезает):
@@ -2386,16 +2538,19 @@ def main():
     # Сами ветки транслятора теперь падают ассертом; это — последняя проверка по тексту.
     assert 'UNHANDLED' not in src, 'транслятор уронил команду в комментарий:\n  ' + \
         '\n  '.join(l.strip() for l in src.split('\n') if 'UNHANDLED' in l)
-    hole_desc = None
+    hole_desc = hud_desc = None
     if target == 'vec':
         # ПОСЛЕДНИМ шагом: текст уже окончательный (трансляция, нативные процедуры, звук,
         # IX-хелперы), поэтому длины считаются по тому же тексту, что уйдёт в ассемблер.
         src, hmoved, hblk, hole_desc = a8_pack_holes(src, A8_HOLES, A8_HOLE_BYTES, A8_HOLE_SKIP)
+        if os.environ.get('A8_HUD_LAYOUT', 'on') != 'off':
+            src, hud_desc = a8_layout_upper(src, A8_HUD_WINDOWS)
     open(outp, 'w', encoding='utf-8').write(src)
     print(f'{inp} -> {outp} (цель {target}); IX-хелперов {len(_ix_used)}; exx-пар {exx_pairs}'
           + (f'; ограничитель темпа: {pace_desc}' if pace_desc else '')
           + (f'; di-блоки: {dib_desc}' if dib_desc else '')
-          + (f'; дыры вне картинки: {hole_desc}' if hole_desc else ''))
+          + (f'; дыры вне картинки: {hole_desc}' if hole_desc else '')
+          + (f'; верхний регион мимо полосы HUD: {hud_desc}' if hud_desc else ''))
 
 
 if __name__ == '__main__':
