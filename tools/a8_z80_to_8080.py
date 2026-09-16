@@ -1407,7 +1407,13 @@ def a8_layout_upper(src, windows, mark='ВЕРХНИЙ регион кода', e
     i0 = next(i for i, l in enumerate(lines) if mark in l)
     i1 = next(i for i, l in enumerate(lines) if endmark in l)
     at = a8_walk(lines, i1)
-    assert at and at[i1] is not None, 'верхний регион: счёт адресов сбился'
+    if at is None or at[i1] is None:
+        # Счёт всего текста сбивает ЛЮБАЯ неизвестная инструкция, в том числе в НИЖНЕМ регионе
+        # (так роняла раскладчик порча гейта check_i8080: `bit n,r` — Z80-only). Раскладчику
+        # нижний регион не нужен: считаем только сам верхний, от его собственного ORG.
+        sub = a8_walk(lines[i0:i1 + 1], i1 - i0)
+        assert sub and sub[-1] is not None, 'верхний регион: счёт адресов сбился'
+        at = [None] * i0 + sub
     blocks = _u_split(lines, at, i0 + 1, i1)
     wins = [{'a': a, 'end': a + sz, 'cur': a, 'blk': []} for a, sz in windows]
     # тесная укладка: ограниченные блоки первыми, дальше крупные; окно — самое тесное подходящее
