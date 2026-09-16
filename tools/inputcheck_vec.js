@@ -41,12 +41,17 @@ function joy(...bits){ JOY = JOY_IDLE; for(const b of bits) JOY &= ~b & 0xFF; re
 const cpu = new ctx.I8080(memory, io), tape = { advance: () => {}, sample: 0, reset: () => {} },
   v06c = new ctx.Vector06c(cpu, memory, io, ay, tape);
 v06c.bmp = new Uint32Array(576 * 288); v06c.displayFrame = () => {}; v06c.check_breakpoint = () => false; v06c.dbg = null;
-memory.init_from_array(new Uint8Array(fs.readFileSync(ROM)).subarray(0, 0x10000), 0);
+// БАЗА СТЕКА — ИЗ ОБРАЗА (загрузчик 0x0000: `di` + `ld sp,imm`), а не числом: она переехала
+// вместе с переменными в конец нижнего региона и переедет ещё.
+const IMG = new Uint8Array(fs.readFileSync(ROM)).subarray(0, 0x10000);
+if (IMG[0] !== 0xF3 || IMG[1] !== 0x31) throw new Error("загрузчик не `di / ld sp,imm` — база стека не читается");
+const SPBASE = IMG[2] | (IMG[3] << 8);
+memory.init_from_array(IMG, 0);
 memory.detach_boot && memory.detach_boot();
 const rd = a => memory.bytes[memory.tobank(a & 0xffff)];
 const wr = (a, v) => memory.write(a & 0xffff, v & 0xff, false);
 const PARK = 0x0030;           // дыра между загрузчиком (0x0000..0x0006) и RST 38h (0x0038)
-const SP = 0x7FFE;             // стек игры растёт вниз от 0x8000
+const SP = SPBASE - 2;         // стек игры растёт вниз от SPBASE (= seed_1)
 
 // ---- клавиши матрицы Вектора: [ряд, маска] ----
 // ряд 0 ВК/стрелки, ряд 2 цифры 0..7, ряд 3 цифры 8,9,
@@ -63,7 +68,7 @@ function press(keys) { keyboard.matrix.fill(0); for (const k of keys) { const [r
 let bad = 0;
 const chk = (ok, msg) => { if (!ok) { bad++; console.log("  x " + msg); } else console.log("  + " + msg); };
 
-cpu.pc = 0; cpu.sp = 0x8000; cpu.iff = false;
+cpu.pc = 0; cpu.sp = SPBASE; cpu.iff = false;
 for (let f = 0; f < 150; f++) v06c.oneInterrupt(true);   // загрузка, меню нарисовано, крутится menu_loop
 
 // ================= часть 1: меню =================
@@ -138,7 +143,7 @@ chk(rd(L.vec_pal + 8) !== 0xC0, `игра пошла: палитра комна�
 
 // ================= часть 2: раскладки =================
 wr(PARK, 0xC3); wr(PARK + 1, PARK & 0xFF); wr(PARK + 2, PARK >> 8);
-cpu.pc = PARK; cpu.sp = 0x8000; cpu.iff = true;
+cpu.pc = PARK; cpu.sp = SPBASE; cpu.iff = true;
 press([]); for (let f = 0; f < 3; f++) v06c.oneInterrupt(true);
 
 function userInput(uim, keys, jbits) {

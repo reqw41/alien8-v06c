@@ -19,7 +19,9 @@
 // ФАЗЫ: «загрузка/меню» (от сброса до входа в первую комнату — там же заставка, меню,
 // выбор раскладки) и «игра». Печатаются обе: глубина меню бывает больше игровой.
 //
-// A8SP_LIMIT=N — ГЕЙТ: код 1, если глубина дошла до N байт (N = зарезервированный буфер).
+// ГЕЙТ: код 1, если глубина дошла до зарезервированного под стеком буфера. Размер буфера
+// берётся ИЗ ЛИСТИНГА: (база SP) - (потолок кода нижнего региона из ASSERT'а). A8SP_LIMIT=N
+// задаёт его вручную.
 // A8SP_TOP=k  — сколько самых глубоких точек печатать (по умолчанию 6).
 // A8SP_LIVES=n — положить n жизней при входе в комнату. Нужно, чтобы сценарий гибели
 //   дошёл до GAME OVER (иначе за 600 итераций жизни не кончаются, а экран «GAME OVER»
@@ -30,7 +32,7 @@ const base = "/Users/boris/projects/vector06js";
 const [ROM, SLD, NS, INPUTS, ROOMSA] = process.argv.slice(2);
 const N = +NS || 300;
 if (!ROM || !SLD) { console.error("нужно: <rom> <sld> <итераций> [inputs.txt] [комнаты|all]"); process.exit(2); }
-const LIMIT = +(process.env.A8SP_LIMIT || 0);
+let LIMIT = +(process.env.A8SP_LIMIT || 0);   // 0 = взять из сборки (см. ниже)
 const TOPN = +(process.env.A8SP_TOP || 6);
 const IRQDROP = !!process.env.A8_IRQDROP;
 
@@ -49,6 +51,17 @@ const lst = fs.readFileSync(ROM.replace(/\.r0m$/, ".lst"), "latin1").split("\n")
 let SYNC = -1;
 for (const l of lst) { const m = l.match(/^\s*\d+\+?\s+([0-9A-F]{4})\s.*\s+call\s+init_start_location/); if (m) { SYNC = parseInt(m[1], 16); break; } }
 if (SYNC < 0) throw new Error("не нашёл call init_start_location в листинге");
+// ЗАРЕЗЕРВИРОВАННЫЙ БУФЕР — ИЗ СБОРКИ, а не числом: это (база SP) - (потолок кода нижнего
+// региона), то есть ровно то место, куда стеку можно расти, не сев на код.
+if (!LIMIT) {
+  // ЛОВУШКА: листинг выше прочитан как latin1 (так адреса разбираются проще), и комментарий
+  // по-русски в нём — мусор. Для поиска по тексту читаем его отдельно как utf8.
+  for (const l of fs.readFileSync(ROM.replace(/\.r0m$/, ".lst"), "utf8").split("\n")) {
+    const m = l.match(/ASSERT \$ <= (0x[0-9a-fA-F]+)\s*;\s*нижний регион не должен дорасти до стека/);
+    if (m) { LIMIT = SPBASE - parseInt(m[1], 16); break; }
+  }
+  if (!LIMIT) console.log("предупреждение: в листинге нет ASSERT'а потолка кода — гейт по глубине выключен");
+}
 const LABS = Object.entries(L).filter(([, a]) => a >= 0x40).sort((a, b) => a[1] - b[1]);
 function nameOf(pc) {
   let lo = 0, hi = LABS.length - 1, r = null;

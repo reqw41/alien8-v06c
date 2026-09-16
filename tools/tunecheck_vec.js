@@ -48,9 +48,14 @@ function joy(...bits){ JOY = JOY_IDLE; for(const b of bits) JOY &= ~b & 0xFF; re
 const cpu = new ctx.I8080(memory, io), tape = { advance: () => {}, sample: 0, reset: () => {} },
       v06c = new ctx.Vector06c(cpu, memory, io, ay, tape);
 v06c.bmp = new Uint32Array(576 * 288); v06c.displayFrame = () => {}; v06c.check_breakpoint = () => false; v06c.dbg = null;
-memory.init_from_array(new Uint8Array(fs.readFileSync(ROM)).subarray(0, 0x10000), 0);
+// БАЗА СТЕКА — ИЗ ОБРАЗА (загрузчик 0x0000: `di` + `ld sp,imm`), а не числом: она переехала
+// вместе с переменными в конец нижнего региона и переедет ещё.
+const IMG = new Uint8Array(fs.readFileSync(ROM)).subarray(0, 0x10000);
+if (IMG[0] !== 0xF3 || IMG[1] !== 0x31) throw new Error("загрузчик не `di / ld sp,imm` — база стека не читается");
+const SPBASE = IMG[2] | (IMG[3] << 8);
+memory.init_from_array(IMG, 0);
 memory.detach_boot && memory.detach_boot();
-cpu.pc = 0; cpu.sp = 0xBC00; cpu.iff = false;
+cpu.pc = 0; cpu.sp = SPBASE; cpu.iff = false;
 if (L.vkbd !== undefined) for (let r = 0; r < 8; r++) memory.write(L.vkbd + r, 0xFF, false);
 
 // довести игру до комнаты (как остальные гейты)
@@ -114,7 +119,7 @@ const IRQDROP = !!process.env.A8_IRQDROP;
 let bad = 0, lost = 0;
 for (const nm of TUNES) {
   const hdr = L["msx_hdr_" + nm];
-  cpu.sp = 0x7F00;
+  cpu.sp = SPBASE;   // стек игры: своего у стенда нет, 0x7F00 после переезда переменных — их середина
   cpu.memory_write_word(cpu.sp - 2, SENT, true); cpu.sp -= 2;
   cpu.set_rp(2, hdr);           // DE = заголовок мелодии
   cpu.pc = L.play_audio;
