@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// ГЕЙТ ПЛОСКОСТИ 2: в 0xC000-0xCFFF не должно попасть НИ ОДНОЙ записи.
+// ГЕЙТ ПЛОСКОСТИ 2: в ПОЛЕ (смещения 0x40..0xDF страниц 0xC0..0xDF) не должно попасть
+// НИ ОДНОЙ записи.
 //
 // До этого захода страницы 0xC0..0xC7 были «защитной зоной»: туда сваливались мусорные
 // атрибуты ZX (zxaram) и вылет печати за столбец 31 (в линейном буфере ZX он заворачивался
@@ -10,7 +11,12 @@
 //
 // СТРАНИЦЫ C8..CF добавлены в диапазон переездом переменных игры (0xC800 -> конец нижнего
 // региона, §17.4 рецепта KL): раньше там жили 1928 байт состояния, и гейт по ним бы краснел.
-// 0xD000-0xDFFF пока занят верхним регионом кода — это следующий шаг (ветка p2reflow).
+// ТЕПЕРЬ СУДИТСЯ ВСЯ ПЛОСКОСТЬ 0xC000-0xDFFF, но НЕ ЦЕЛИКОМ, а по смещениям:
+//   0x40..0xDF — ПОЛЕ: сюда не пишет никто, это и есть гейт;
+//   0x20..0x3F — полоса панели: сюда пишет vec_hud_mask (маска белого HUD), она законна;
+//   0xE0..0x1F — дыры вне картинки: там лежит верхний регион кода, записей тоже быть не должно,
+//                но их поймал бы не этот гейт, а падение игры.
+// Смещения задаются A8SPILL_OFF=lo-hi (по умолчанию 40-DF).
 // ЗАПИСИ — не единственная опасность: код, который просто ЛЕЖИТ в этих страницах, гейт не
 // увидит (в него никто не пишет), а на экране он всё равно побелит точки. Это судит
 // tools/a8_regions.py по листингу — гейты дополняют друг друга.
@@ -19,7 +25,7 @@
 //
 // Комнаты: «all» — все 128 из tools/a8_rooms.py (каждая своим прогоном, ~1 с на комнату),
 // «48 137 39» — только эти, пусто — стартовая. Диапазон задаётся A8SPILL=lo-hi (шестнадцатеричн.,
-// по умолчанию C000-CFFF). Печатает число записей и ТОП ПИСАТЕЛЕЙ по PC; код возврата 1,
+// по умолчанию C000-DFFF). Печатает число записей и ТОП ПИСАТЕЛЕЙ по PC; код возврата 1,
 // если запись была хоть одна.
 //
 // Почему PC, а не просто счётчик: писателей ровно два класса — цепочки print_sprite и заливка
@@ -38,8 +44,12 @@ const base = "/Users/boris/projects/vector06js";
 const [ROM, SLD, NS, INPUTS, ROOMSA] = process.argv.slice(2);
 const N = +NS || 300;
 if (!ROM || !SLD) { console.error("нужно: <rom> <sld> <итераций> [inputs.txt] [комнаты|all]"); process.exit(2); }
-const RANGE = (process.env.A8SPILL || "C000-CFFF").split("-").map(x => parseInt(x, 16));
+const RANGE = (process.env.A8SPILL || "C000-DFFF").split("-").map(x => parseInt(x, 16));
 const [LO, HI] = RANGE;
+// Смещения внутри страницы: судится ПОЛЕ. Полосу панели (0x20..0x3F) законно пишет vec_hud_mask,
+// дыры вне картинки (0xE0..0x1F) заняты кодом верхнего региона.
+const OFFS = (process.env.A8SPILL_OFF || "40-DF").split("-").map(x => parseInt(x, 16));
+const [OLO, OHI] = OFFS;
 
 // ---- метки сборки ----
 const L = {};
@@ -138,7 +148,7 @@ function run(room) {
         spWant = (de + 2 * (K * h - (wid - (rd(L.loc_D10F + 1) + 1)))) & 0xFFFF;
       }
     }
-    if (a >= LO && a <= HI) {
+    if (a >= LO && a <= HI && (a & 0xFF) >= OLO && (a & 0xFF) <= OHI) {
       hits++; byPC.set(cpu.pc, (byPC.get(cpu.pc) || 0) + 1);
       if (first.length < 8) first.push({ iter, pc: cpu.pc, a, w });
     }
@@ -176,7 +186,7 @@ let rooms = [0];
 if (ROOMSA === "all") rooms = cp.execFileSync("python3", ["tools/a8_rooms.py"], { encoding: "utf8" }).trim().split(/\s+/).map(Number);
 else if (ROOMSA) rooms = ROOMSA.trim().split(/[\s,]+/).map(Number);
 
-console.log(`ГЕЙТ ПЛОСКОСТИ 2: диапазон ${LO.toString(16)}-${HI.toString(16)}, комнат ${rooms.length}, ` +
+console.log(`ГЕЙТ ПЛОСКОСТИ 2: ${LO.toString(16)}-${HI.toString(16)}, смещения ${OLO.toString(16)}-${OHI.toString(16)}, комнат ${rooms.length}, ` +
             `${N} итераций, сценарий ${INPUTS ? INPUTS.replace(/.*\//, "") : "покой"}`);
 let total = 0, badRooms = 0; const allPC = new Map(); let PSMAX = -1, PSN = 0; const PSH = new Map();
 let SPN = 0, SPBAD = 0; const SPSHOW = [];
@@ -210,7 +220,7 @@ if (total) {
   console.log("писатели (PC x записей):");
   for (const [pc, n] of [...allPC.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12))
     console.log(`  ${pc.toString(16)} (${nameOf(pc)}) x${n}`);
-  console.log(`КРАСНЫЙ: ${total} записей в ${LO.toString(16)}-${HI.toString(16)} из ${rooms.length} комнат (красных ${badRooms})`);
+  console.log(`КРАСНЫЙ: ${total} записей в ${LO.toString(16)}-${HI.toString(16)} смещения ${OLO.toString(16)}-${OHI.toString(16)} из ${rooms.length} комнат (красных ${badRooms})`);
   process.exit(1);
 }
-console.log(`ЗЕЛЁНЫЙ: ${rooms.length} комнат по ${N} итераций — ни одной записи в ${LO.toString(16)}-${HI.toString(16)}`);
+console.log(`ЗЕЛЁНЫЙ: ${rooms.length} комнат по ${N} итераций — ни одной записи в поле плоскости 2 (${LO.toString(16)}-${HI.toString(16)}, смещения ${OLO.toString(16)}-${OHI.toString(16)})`);

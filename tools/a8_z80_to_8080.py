@@ -1305,17 +1305,24 @@ def a8_pack_holes(src, holes, need=-1, exclude=()):
     return '\n'.join(kept[:ei + 1] + out + kept[ei + 1:]), moved, nblk, desc
 
 
-# ============ верхний регион в обход полосы HUD (плоскость 2) ============
-# Под селектор БЕЛОГО HUD (как в Knight Lore) отдана плоскость 2, 0xC000..0xDFFF. Панель
-# Alien 8 занимает нижние 32 строки картинки — ZX-строки 160..191, — а буфер Вектора
-# столбцовый: адрес = база + столбец*256 + 32 + Y, Y = 223 - строка ZX. То есть панель
-# лежит в смещениях 0x20..0x3F КАЖДОЙ из 32 страниц плоскости, а не одним куском.
+# ============ верхний регион в дырах плоскости 2 ============
+# Под селектор БЕЛОГО HUD (как в Knight Lore) отдана плоскость 2, 0xC000..0xDFFF. Буфер
+# Вектора столбцовый: адрес = база + столбец*256 + (223 - строка ZX), поэтому КАРТИНКА — это
+# смещения 0x20..0xDF каждой из 32 страниц плоскости, а вне картинки лежат смещения
+# 0xE0..0xFF страницы n и 0x00..0x1F страницы n+1 — 64 БАЙТА ПОДРЯД на пару страниц.
 #
-# Верхний регион кода 0xD000..0xDFFF из-за этого рассыпается на окна: 32 байта в начале,
-# потом по 224 (0xnn40..0xmm1F, через границу страницы) и 192 в конце. Раскладчик режет
-# регион на блоки и раскладывает их по окнам, вставляя ORG; окна задаются списком —
-# после переезда переменных (varmove) к ним добавятся окна страниц 0xC0..0xCF.
+# ПОЧЕМУ КОД В ПЛОСКОСТИ 2 МОЖЕТ ЖИТЬ ТОЛЬКО В ДЫРАХ. Плоскость 2 — это БИТ ИНДЕКСА ПАЛИТРЫ
+# (индекс = p0<<3|p1<<2|p2<<1|p3): любой единичный бит в смещениях 0x20..0xDF поднимает p2 у
+# восьми точек картинки, и там, где есть точка поля (p0=1), вместо цвета комнаты выйдет перо
+# HUD — белым побелеет кусок поля. Первая раскладка (ветка p2reflow) резала регион на окна
+# 0xnn40..0xmm1F, то есть РОВНО ВНУТРИ картинки, и мимо панели, но не мимо поля: годилась
+# только пока плоскость 2 никуда не смотрела. Правило то же, что у Knight Lore (§17.4/17.5):
+#   0x00..0x1F и 0xE0..0xFF — дыры, здесь можно код и данные (2048 Б на всю плоскость);
+#   0x20..0x3F           — полоса панели, здесь только маска vec_hudcols (нули или 0xFF);
+#   0x40..0xDF           — поле, здесь всегда нули.
+# Блоки крупнее 64 Б в дыру не влезают и уезжают в НИЖНИЙ регион (см. a8_layout_upper).
 A8_HUD_LO, A8_HUD_HI = 0x20, 0x3F        # полоса панели в каждой странице плоскости 2
+A8_PIC_LO, A8_PIC_HI = 0x20, 0xDF        # вся картинка: здесь кода и данных быть не может
 A8_PLANE2 = (0xC000, 0xE000)
 
 # Резать ПЕРЕД этими метками нельзя, хотя формально можно:
@@ -1332,29 +1339,21 @@ _U_CUTPREV = re.compile(r'(?i)^(ret$|jp\s+(?!nz\b|z\b|nc\b|c\b|po\b|pe\b|p\b|m\b
                         r'|DB\b|DW\b|DS\b|DEFB\b|DEFW\b|ORG\b|ALIGN\b)')
 
 
-def a8_hud_windows(lo, hi):
-    """Разрешённые окна в [lo, hi): всё, кроме полос page+0x20..page+0x3F плоскости 2."""
-    wins, a = [], lo
-    for p in range(lo & ~0xFF, hi, 0x100):
-        if not A8_PLANE2[0] <= p < A8_PLANE2[1]:
-            continue
-        b0, b1 = max(p + A8_HUD_LO, lo), min(p + A8_HUD_HI + 1, hi)
-        if b1 <= b0:
-            continue
-        if b0 > a:
-            wins.append((a, b0 - a))
-        a = max(a, b1)
-    if hi > a:
-        wins.append((a, hi - a))
-    return wins
+def a8_hud_windows(lo=A8_PLANE2[0], hi=A8_PLANE2[1]):
+    """Дыры вне картинки в [lo, hi): 0xE0..0xFF страницы n + 0x00..0x1F страницы n+1 подряд.
+
+    Первое окно — 0x00..0x1F самой нижней страницы (дыры предыдущей страницы у неё нет),
+    последнее обрезано границей hi (за 0xDFFF начинается хвост массива спрайтов). Итого
+    32 + 31*64 + 32 = 2048 Б — ровно столько же, сколько дыр в плоскости 1."""
+    wins = [(lo, min(lo + 0x20, hi) - lo)]
+    for p in range(lo >> 8, hi >> 8):
+        a, b = (p << 8) + 0xE0, min(((p + 1) << 8) + 0x20, hi)
+        if b > a:
+            wins.append((a, b - a))
+    return [w for w in wins if w[1] > 0]
 
 
-# Окна раскладчика — СПИСОК, а не одна пара границ. Сейчас верхний регион это 0xD000..0xDFFF:
-# страницы 0xC0..0xC7 держит защитная зона спиллов, 0xC8..0xCF — переменные игры (0xC800..0xCF87).
-# После их переезда в нижний регион (ветка varmove) сюда добавятся окна a8_hud_windows(0xC000,
-# 0xD000); A8_HUD_LOW=1 включает их уже сейчас — проверить, что раскладчик берёт окна из списка.
-A8_HUD_WINDOWS = ((a8_hud_windows(0xC000, 0xD000) if os.environ.get('A8_HUD_LOW') else [])
-                  + a8_hud_windows(0xD000, 0xE000))
+A8_HUD_WINDOWS = a8_hud_windows()
 
 
 def _u_split(lines, at, i0, i1):
@@ -1399,12 +1398,19 @@ def _u_split(lines, at, i0, i1):
 
 
 def a8_layout_upper(src, windows, mark='ВЕРХНИЙ регион кода', endmark='блок Вектора не должен'):
-    """Разложить верхний регион по окнам между полосами HUD, вставляя ORG между блоками.
+    """Разложить верхний регион по дырам плоскости 2; что не влезло — в НИЖНИЙ регион.
 
     Длины блоков считаются тем же счётом, что у упаковщика дыр (a8_walk/_i8080_len/_db_len);
     сверка счёта с листингом — tools/check_plane2.py --walk. Порядок блоков свободен: каждый
     начинается с метки, в которую нельзя провалиться сверху (см. _u_split), а адрес процедуры
-    на скорость i8080 не влияет — ни кэша, ни штрафа за выравнивание у него нет."""
+    на скорость i8080 не влияет — ни кэша, ни штрафа за выравнивание у него нет.
+
+    Дыра — 64 байта, поэтому блок крупнее в неё не влезает ПО ОПРЕДЕЛЕНИЮ (цепочки print_sprite,
+    update_screen, blit_to_screen, fill_window, vec_isr, vec_scan, vec_rpbuild, vec_zxmap,
+    zb_bits, bts_ch). Такие блоки уезжают в хвост нижнего региона — перед его ASSERT'ом, то
+    есть под тот же потолок A8_CODE_TOP. Первым идёт блок с требованием «одна страница»
+    (цепочки print_sprite: вход патчится младшим байтом jp), и перед ним ALIGN 256 — иначе
+    страница не гарантирована; сейчас хвост нижнего региона и так кратен 256, добивка нулевая."""
     lines = src.split('\n')
     i0 = next(i for i, l in enumerate(lines) if mark in l)
     i1 = next(i for i, l in enumerate(lines) if endmark in l)
@@ -1418,6 +1424,7 @@ def a8_layout_upper(src, windows, mark='ВЕРХНИЙ регион кода', e
         at = [None] * i0 + sub
     blocks = _u_split(lines, at, i0 + 1, i1)
     wins = [{'a': a, 'end': a + sz, 'cur': a, 'blk': []} for a, sz in windows]
+    spill = []
     # тесная укладка: ограниченные блоки первыми, дальше крупные; окно — самое тесное подходящее
     for b in sorted(blocks, key=lambda b: (not b['page'], b['align'] == 1, -b['size'], b['name'])):
         best = None
@@ -1429,38 +1436,63 @@ def a8_layout_upper(src, windows, mark='ВЕРХНИЙ регион кода', e
                 continue
             if best is None or w['end'] - a - b['size'] < best[0]:
                 best = (w['end'] - a - b['size'], a, w)
-        assert best, ('верхний регион: блок %s (%d Б) не влез ни в одно окно'
-                      % (b['name'], b['size']))
+        if best is None:                       # в дыру не влез — в хвост нижнего региона
+            spill.append(b)
+            continue
         _, a, w = best
         b['at'] = a
         w['cur'] = a + b['size']
         w['blk'].append(b)
-    out = ['', '; ==== ВЕРХНИЙ РЕГИОН В ОБХОД ПОЛОСЫ HUD (плоскость 2) ====',
-           '; Панель Alien 8 (ZX-строки 160..191) лежит в смещениях 0x%02X..0x%02X КАЖДОЙ страницы'
-           % (A8_HUD_LO, A8_HUD_HI),
-           '; плоскости 2, поэтому регион разложен по окнам между полосами (a8_layout_upper).']
+    out = ['', '; ==== ВЕРХНИЙ РЕГИОН В ДЫРАХ ПЛОСКОСТИ 2 ====',
+           '; Картинка занимает смещения 0x%02X..0x%02X КАЖДОЙ страницы плоскости 2, и любой'
+           % (A8_PIC_LO, A8_PIC_HI),
+           '; единичный бит там поднял бы p2 у точки поля (белое перо HUD). Код и данные —',
+           '; только в дырах вне картинки: 0xE0..0xFF страницы n + 0x00..0x1F страницы n+1.']
     for w in wins:
         if not w['blk']:
             continue
-        out.append('        ORG %#06x   ; окно %#06x..%#06x (%d Б)'
+        out.append('        ORG %#06x   ; дыра %#06x..%#06x (%d Б)'
                    % (w['blk'][0]['at'], w['a'], w['end'] - 1, w['end'] - w['a']))
         for b in w['blk']:
             out += b['lines']
-        out.append('        ASSERT $ <= %#06x   ; окно %#06x не должно налезть на полосу HUD'
-                   % (w['end'], w['a']))
-    used = sum(b['size'] for b in blocks)
+        out.append('        ASSERT $ <= %#06x   ; дыра %#06x (%d Б) не должна налезть на картинку'
+                   % (w['end'], w['a'], w['end'] - w['a']))
+    low = []
+    if spill:
+        # сортировка: «одна страница» первым (за ним ALIGN 256), дальше по убыванию размера
+        spill.sort(key=lambda b: (not b['page'], -b['size'], b['name']))
+        low = ['', '; ==== БЛОКИ, КОТОРЫЕ НЕ ВЛЕЗАЮТ В ДЫРУ 64 Б — В НИЖНИЙ РЕГИОН ====',
+               '; ALIGN 256 нужен первому блоку (цепочки print_sprite обязаны лежать в ОДНОЙ',
+               '; странице: вход патчится младшим байтом jp). Остальным адрес безразличен.',
+               '        ALIGN 256']
+        for b in spill:
+            low += b['lines']
+    used = sum(b['size'] for b in blocks) - sum(b['size'] for b in spill)
     free = sum(w['end'] - w['a'] for w in wins) - used
-    desc = ('%d блоков, %d Б в %d окнах из %d, свободно %d'
-            % (len(blocks), used, sum(1 for w in wins if w['blk']), len(wins), free))
+    desc = ('%d блоков, %d Б в %d дырах из %d, свободно %d; в нижний регион %d Б (%d блоков)'
+            % (len(blocks), used, sum(1 for w in wins if w['blk']), len(wins), free,
+               sum(b['size'] for b in spill), len(spill)))
     if os.environ.get('A8_HUD_DEBUG'):
         for w in wins:
-            print('   окно %#06x..%#06x (%3d Б): свободно %3d' % (w['a'], w['end'] - 1,
+            if not w['blk']:
+                continue
+            print('   дыра %#06x..%#06x (%3d Б): свободно %3d' % (w['a'], w['end'] - 1,
                   w['end'] - w['a'], w['end'] - w['cur']), file=sys.stderr)
             for b in w['blk']:
-                print('      %#06x %4d Б  %-28s%s%s' % (b['at'], b['size'], b['name'],
-                      ' [одна страница]' if b['page'] else '',
+                print('      %#06x %4d Б  %-28s%s' % (b['at'], b['size'], b['name'],
                       ' [ALIGN %d]' % b['align'] if b['align'] > 1 else ''), file=sys.stderr)
-    return '\n'.join(lines[:i0] + out + lines[i1:]), desc
+        print('   нижний регион:', file=sys.stderr)
+        for b in spill:
+            print('      %9s %4d Б  %-28s%s' % ('', b['size'], b['name'],
+                  ' [одна страница]' if b['page'] else ''), file=sys.stderr)
+    src = '\n'.join(lines[:i0] + out + lines[i1:])
+    if low:
+        k = next(i for i, l in enumerate(lines) if A8_LOW_END in l)
+        assert k < i0, 'ASSERT нижнего региона обязан быть ВЫШЕ верхнего'
+        lines = src.split('\n')
+        k = next(i for i, l in enumerate(lines) if A8_LOW_END in l)
+        src = '\n'.join(lines[:k] + low + lines[k:])
+    return src, desc
 
 
 # ============================ склейка Alien 8 ============================
@@ -2558,7 +2590,7 @@ def main():
           + (f'; ограничитель темпа: {pace_desc}' if pace_desc else '')
           + (f'; di-блоки: {dib_desc}' if dib_desc else '')
           + (f'; дыры вне картинки: {hole_desc}' if hole_desc else '')
-          + (f'; верхний регион мимо полосы HUD: {hud_desc}' if hud_desc else ''))
+          + (f'; верхний регион в дырах плоскости 2: {hud_desc}' if hud_desc else ''))
 
 
 if __name__ == '__main__':
