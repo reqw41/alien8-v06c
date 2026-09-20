@@ -18,6 +18,7 @@ Python -> дамп реальных вызовов -> прогон специф�
 Где решение принято перебором, а не замером, — проверка исчерпывающая: дерево классов
 перекрытия сверено со всеми 27 входами таблицы off_C833 программно.
 """
+import os
 import re
 
 # Дополнение к scratch-области 0x0040..0x00A0 обеих целей.
@@ -31,6 +32,36 @@ def _sub(src, pat, repl, name, count=1, flags=re.M):
     src, n = re.subn(pat, lambda m: repl, src, count=count, flags=flags)
     assert n == count, "a8_native_logic: не найдено (%s): %d вместо %d" % (name, n, count)
     return src
+
+
+# ---------------------------------------------------------------------------
+# loc_CDCA (хвост retrieve_screen): 23 × `ld (iy+0),0 : inc iy : djnz`.
+#
+# В трансляции это 23 × (il_iy_stn с обнулением + `inc iy` через il_tmp/z80_iy):
+# стартовая 953 такта/итер, комната 48 — 513. Область ПРЯМАЯ (iy+0..+22 без повторений),
+# а хелпер il_iy_stn таскает ~10 обращений к памяти на каждый обнулённый байт.
+#
+# Нативно (чистый i8080, без Z80-форм): пролог сохраняет HL в il_tmp, hl=(z80_iy) —
+# база, записанная хелпером add iy,bc выше; тело — цикл `ld (hl),a : inc hl` +
+# `dec b : jp nz` (джвнз на i8080 — то же, что уже делает транслятор); эпилог пишет
+# (z80_iy)=hl=база+23 (как и в оригинале) и восстанавливает HL из il_tmp.
+# HL на входе мёртв: следующие две команды оригинала используют HL через ex de,hl,
+# но HL в цикл заходит как (z80_iy), а в начале restore из il_tmp возвращает входное HL.
+# ~953 -> ~25 (стартовая), ~513 -> ~25 (комната 48).
+# ---------------------------------------------------------------------------
+N_ZERO_COPY = """\t\tld (il_tmp),hl
+\t\tld hl,(z80_iy)
+\t\tld a, 0
+\t\tld b, 0x17
+loc_CDCA:
+\t\tld (hl), a
+\t\tinc hl
+\t\tdec b
+\t\tjp nz, loc_CDCA
+\t\tld (z80_iy),hl
+\t\tld hl,(il_tmp)
+"""
+
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +106,8 @@ def scratch(src):
     return _sub(src, r'^__A8_NATIVE_SCRATCH__', SCRATCH.rstrip('\n'), 'место под scratch')
 
 
-def presub(src):
-    """Правки на тексте Z80 ДО трансляции. Вызывать ПОСЛЕ подстановок font -> a8_vars_end."""
+def presub(src, target='vec'):
+    """Правки на тексте Z80 ДО трансляции. target: 'vec' (полный) или 'lockstep' (1:1)."""
     # 1) считать границу при загрузке комнаты
     src = _sub(src, r'^zero_end_of_graphic_objs_tbl:\n', _NOBJ_HEAD, 'голова zero_end')
     src = _sub(src, r'^        jr zero_end_of_graphic_objs_tbl\n',
@@ -101,6 +132,11 @@ def presub(src):
     src = _sub(src, r'^        ld bc, a8_vars_end   ; end of table\?\n',
                "        ld bc, (a8_objend)   ; A8: конец ЗАНЯТОЙ части таблицы (было: конец таблицы)\n",
                'конец таблицы в ret_from_tbl_jp')
+    # 2) copy-цикл loc_CDCA (хвост retrieve_screen): нативная пересылка.
+    #     Только для цели vec: lockstep обязан идти 1:1 с оригиналом.
+    if target == 'vec':
+        src = _sub(src, r'^        ld b, 0x17\nloc_CDCA:\n        ld \(iy\+0\), 0\n        inc iy\n        djnz loc_CDCA\n',
+                   N_ZERO_COPY, 'нулевой хвост graphic_objs_tbl (loc_CDCA)')
     return src
 
 
