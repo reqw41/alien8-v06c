@@ -52,7 +52,14 @@ function key(k,down){
   const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke(VKBD+r,rows[r]);}
 const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync(INPUTS,"utf8").split("\n")){const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+LAG]=inputs[+m[1]+LAG]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
 let FR=0,TOT=0,iterFr=[],iterCy=[];
+// Цена ВХОДА в комнату (решение 4D): метрика — установившийся темп и ОТДЕЛЬНО вход.
+// Ловушка: остаток «кадров − среднее×148» это в точности E + 1-я итерация, то есть
+// работа комнаты, а не константа; отсюда и «21» в лёгкой 104 против 39 в остальных.
+let entryFr=-1,entryAttr=-1;
 let phase="menu",iter=0,steps=0,total=0; const cyc=new Float64Array(fa.length), calls=new Float64Array(fa.length), hcyc=new Float64Array(fa.length);
+// Отдельные счётчики для интервала входа (от старта замера до 2-й вершины цикла), чтобы
+// основная таблица «тактов/итер» оставалась байт в байт той же, что в старых логах.
+const ecyc=new Float64Array(fa.length), ecalls=new Float64Array(fa.length), ehcyc=new Float64Array(fa.length);
 // A8GAG=1: погасить seed_3 += mem[seed_2] (86 add a,(hl) -> 00 nop). Без этого две сборки
 // с разной раскладкой кода играют РАЗНЫЙ сценарий и «тактов/итерацию» несравнимы (§14/§17.1).
 if(process.env.A8GAG){ const rdb=a=>memory.bytes[memory.tobank(a&0xffff)];
@@ -69,7 +76,7 @@ memory.write=function(a,w,s){a&=0xffff;
   // подменяем САМУ ЗАПИСЬ, пока не загружена первая комната (phase === "init").
   if(process.env.A8ROOM&&phase==="init"&&(a===L.graphic_objs_tbl+8||a===L.graphic_objs_tbl+40)){
     w=+process.env.A8ROOM;roomSet=true;}
-  if(a===ROOM&&phase==="init"&&w!==0){phase="game";key("0",false);}
+  if(a===ROOM&&phase==="init"&&w!==0){phase="game";key("0",false);if(entryFr<0){entryFr=FR;entryAttr=w;}}
   if(a===SEED2HI&&phase==="game"){iter++;iterFr.push(FR);iterCy.push(TOT);for(const [k,d] of (inputs[iter]||[]))key(k,d);}
   return ow(a,w,s);};
 for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
@@ -100,7 +107,8 @@ while(iter-startIter<N&&steps<3e8){
   if(PC0>=0&&pc>=PC0&&pc<PCE){if(cpu.last_opcode===0x76)pcHalt+=c;else pcCode+=c;}
   tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
   if(cpu.last_opcode===0xd3)io.commit();
-  let i=idx(pc);if(i>=0){if(isHelper[i]){ilTot+=c;if(pc===fa[i])ilCalls++;if(cur>=0){cyc[cur]+=c;hcyc[cur]+=c;}}else{cur=i;cyc[i]+=c;if(pc===fa[i])calls[i]++;}}}
+  let i=idx(pc);if(i>=0){if(isHelper[i]){ilTot+=c;if(pc===fa[i])ilCalls++;if(cur>=0){cyc[cur]+=c;hcyc[cur]+=c;}}else{cur=i;cyc[i]+=c;if(pc===fa[i])calls[i]++;}
+    if(iter<=1){ecyc[i]+=c;if(pc===fa[i])ecalls[i]++;if(isHelper[i])ehcyc[i]+=c;}}}
 const iters=iter-startIter;
 console.log(`IX/IY-хелперы: ${(ilTot/iters).toFixed(0)} тактов/итер (${(100*ilTot/total).toFixed(1)} % всех тактов), вызовов ${(ilCalls/iters).toFixed(1)}/итер, ${(ilTot/Math.max(1,ilCalls)).toFixed(1)} такта на обращение`);
 console.log(`итераций ${iters}, инструкций ${steps}, тактов ${total}, тактов/итерацию ${(total/iters).toFixed(0)} (${(3000000/(total/iters)).toFixed(1)} итер/с на 3 МГц)`);
@@ -126,8 +134,26 @@ if(PC0>=0)console.log(`ограничитель темпа: ${(pcCode/iters).toF
     console.log(`  по тактам (в кадрах): среднее ${meanc.toFixed(3)} мин ${Math.min(...tc).toFixed(3)} макс ${Math.max(...tc).toFixed(3)} СКО ${sd.toFixed(3)}`);
     console.log(`  гистограмма кадров: ${Object.keys(h).map(Number).sort((a,b)=>a-b).map(k=>k+":"+h[k]).join(" ")}`);
     console.log(`  узор (первые 60): ${t.slice(0,60).map(x=>x<10?x:"+").join("")}`); } }
+// Интервал «запись атрибута комнаты -> первая вершина главного цикла» — ровно то, что
+// печатает ZX-стенд (zx-stand/zx_idle600.log:2 «кадр входа в комнату=393 (attr 03)
+// первая итерация=кадр 398», там 5 кадров). Наш отсчёт стартует сразу после записи
+// атрибута (её делает прогрев, FR там ещё 0), так что интервал сравним один в один.
+{ if(entryFr>=0&&iterFr.length){
+    console.log(`кадр входа в комнату=${entryFr} (attr ${entryAttr.toString(16).toUpperCase().padStart(2,"0")})  первая итерация=кадр ${iterFr[0]}  интервал=${iterFr[0]-entryFr} кадров`);
+    if(iterCy.length>1)console.log(`вход в комнату: до 1-й вершины ${iterFr[0]} кадров (${iterCy[0].toFixed(0)} тактов) + 1-я итерация ${iterFr[1]-iterFr[0]} кадров (${(iterCy[1]-iterCy[0]).toFixed(0)} тактов) = ${iterFr[1]} кадров (${iterCy[1].toFixed(0)} тактов)`);
+  } }
 const rows_=[];for(let i=0;i<fa.length;i++)if(cyc[i]>0)rows_.push([fnm[i],cyc[i],(i+1<fa.length?fa[i+1]:0x10000)-fa[i],calls[i],hcyc[i]]);
 rows_.sort((a,b)=>b[1]-a[1]);
 console.log("процедура                          тактов%   тактов/итер  байт  вызовов/итер  из них IX-хелперы%");
 let acc=0;for(const [n,c,sz,cl,hc] of rows_.slice(0,+(process.env.A8TOP||40))){acc+=c;console.log(`${n.padEnd(34)} ${(100*c/total).toFixed(1).padStart(6)}%  ${(c/iters).toFixed(0).padStart(10)}  ${String(sz).padStart(5)}  ${(cl/iters).toFixed(1).padStart(8)}  ${hc>0?(100*hc/c).toFixed(0)+'%':''}`);}
 console.log(`(топ = ${(100*acc/total).toFixed(1)} %)`);
+// Таблица процедур ВХОДА в комнату (A8_ENTRY=1): кто съедает те самые ~39 кадров.
+if(process.env.A8_ENTRY&&iterCy.length>1){
+  const eTot=iterCy[1]; const er=[];
+  for(let i=0;i<fa.length;i++)if(ecyc[i]>0)er.push([fnm[i],ecyc[i],(i+1<fa.length?fa[i+1]:0x10000)-fa[i],ecalls[i],ehcyc[i]]);
+  er.sort((a,b)=>b[1]-a[1]);
+  console.log(`процедуры ВХОДА в комнату (E + 1-я итерация = ${iterFr[1]} кадров, ${eTot.toFixed(0)} тактов):`);
+  console.log("процедура                          тактов%   тактов      байт  вызовов  из них IX-хелперы%");
+  let eacc=0;for(const [n,c,sz,cl,hc] of er.slice(0,+(process.env.A8TOP||40))){eacc+=c;console.log(`${n.padEnd(34)} ${(100*c/eTot).toFixed(1).padStart(6)}%  ${c.toFixed(0).padStart(8)}  ${String(sz).padStart(5)}  ${cl.toFixed(1).padStart(7)}  ${hc>0?(100*hc/c).toFixed(0)+'%':''}`);}
+  console.log(`(топ входа = ${(100*eacc/eTot).toFixed(1)} %)`);
+}
