@@ -1700,66 +1700,157 @@ adz_lp:
 adz_z:
 		call do_objs_intersect_on_z
 		jp nc, adz_nx
-		call il_ix_set
-		db 12, 1<<2
-		call il_ix_lda
-		db 13
-		rrca
-		and 0x40
-		call il_iy_or
-		db 13
-		call il_iy_sta
-		db 13
-		rlca
-		and 0x40
-		call il_ix_or
-		db 13
-		call il_ix_sta
-		db 13
-		call il_ix_bit
-		db 7, 1<<2
-		jp z, adz_h9
-		call il_ix_lda
-		db 0
-		sub 0x10
-		cp 0x20
-		jp nc, adz_h7
-		push af
+		; Инлайн шага 2.3 (образец ixrest): scratch — только A/HL и ячейки il_tmp/il_tmp2.
+		; HL=координаты игрока паркуем в il_tmp2 (adz_h9 читает ld a,h / ld h,a);
+		; DE=указатель записи, C=мл. координата (её читает do_objs_intersect_on_x), B=счётчик.
 		ld (il_tmp2),hl
-		ld hl,(z80_iy)
+		ld hl,(z80_ix)
 		ld a,l
-		add a,(13)&255
+		add a,12
 		ld l,a
 		ld a,h
-		adc a,((13)>>8)&255
-		ld h,a
+		adc a,0
+		ld h,a				; -> ix+12
+		ld a,(hl)
+		or 1<<2
+		ld (hl),a				; set 2,(ix+12)
+		inc hl					; -> ix+13
+		ld a,(hl)
+		rrca
+		and 0x40				; v1 = бит7(ix+13) как 0x40
+		ld (il_tmp),a
+		ld hl,(z80_iy)
+		ld a,l
+		add a,13
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+13
+		ld a,(il_tmp)
+		or (hl)
+		ld (hl),a				; (iy+13) |= v1
+		; store (ix+13) ЖИВОЙ: rlca/and 0x40 идут после or (iy+13) — v2 = бит5
+		; объединённого значения (бит6(ix+13) | бит5(iy+13)) как 0x40.
+		rlca
+		and 0x40
+		ld (il_tmp),a
+		ld hl,(z80_ix)
+		ld a,l
+		add a,13
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+13
+		ld a,(il_tmp)
+		or (hl)
+		ld (hl),a				; (ix+13) |= v2
+		ld hl,(z80_ix)
+		ld a,l
+		add a,7
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+7
+		ld a,(hl)
+		and 1<<2
+		jp nz, adz_z_go
+		ld hl,(il_tmp2)
+		jp adz_h9
+adz_z_go:
+		ld a,l
+		sub 7
+		ld l,a
+		ld a,h
+		sbc a,0
+		ld h,a				; -> ix+0
+		ld a,(hl)
+		sub 0x10
+		cp 0x20
+		jp nc, adz_z_h7
+		ld (il_tmp),hl			; сохранить ix+0
+		ld hl,(z80_iy)
+		ld a,l
+		add a,13
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+13
 		ld a,(hl)
 		or 1<<3
-		ld (hl),a
-		ld hl,(il_tmp2)
-		pop af
+		ld (hl),a				; set 3,(iy+13)
+		ld hl,(il_tmp)
+adz_z_h7:
+		ld hl,(il_tmp2)				; координаты обратно в HL перед adz_h7
 adz_h7:
-		call il_ix_lda
-		db 11
-		call il_iy_sta
-		db 11
-		call il_ix_lda
-		db 9
+		; (iy+11)=(ix+11); затем (ix+9)==0 -> (ix+9)=(iy+9)
+		ld (il_tmp2),hl
+		ld hl,(z80_ix)
+		ld a,l
+		add a,11
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+11
+		ld a,(hl)
+		ld (il_tmp),a
+		ld hl,(z80_iy)
+		ld a,l
+		add a,11
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+11
+		ld a,(il_tmp)
+		ld (hl),a
+		ld hl,(z80_ix)
+		ld a,l
+		add a,9
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+9
+		ld a,(hl)
 		and a
-		jp nz, adz_h8
-		call il_iy_lda
-		db 9
-		call il_ix_sta
-		db 9
+		jp nz, adz_h7_r8
+		ld (il_tmp),hl			; сохранить ix+9
+		ld hl,(z80_iy)
+		ld a,l
+		add a,9
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+9
+		ld a,(hl)
+		ld hl,(il_tmp)			; назад на ix+9
+		ld (hl),a
+adz_h7_r8:
+		ld hl,(il_tmp2)				; координаты — adz_h8 припаркует сам
 adz_h8:
-		call il_ix_lda
-		db 10
+		; (ix+10)==0 -> (ix+10)=(iy+10)
+		ld (il_tmp2),hl
+		ld hl,(z80_ix)
+		ld a,l
+		add a,10
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+10
+		ld a,(hl)
 		and a
-		jp nz, adz_h9
-		call il_iy_lda
-		db 10
-		call il_ix_sta
-		db 10
+		jp nz, adz_h8_r9
+		ld (il_tmp),hl			; сохранить ix+10
+		ld hl,(z80_iy)
+		ld a,l
+		add a,10
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+10
+		ld a,(hl)
+		ld hl,(il_tmp)			; назад на ix+10
+		ld (hl),a
+adz_h8_r9:
+		ld hl,(il_tmp2)				; координаты перед adz_h9
 adz_h9:
 		ld a, h
 		call adj_d_for_out_of_bounds
