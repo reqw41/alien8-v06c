@@ -152,6 +152,7 @@ _BODIES = [
     ('sub_AE03', 'N_SUB_AE03'),
     ('adj_dY_for_obj_intersect', 'N_ADJ_DY'),
     ('adj_dZ_for_obj_intersect', 'N_ADJ_DZ'),
+    ('adj_dY_for_out_of_bounds', 'N_ADJ_DY_OOB'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -1878,4 +1879,110 @@ adz_st:
 		ex de, hl
 		ret
         ; End of function adj_dZ_for_obj_intersect
+"""
+
+
+# Шаг 2.4: adj_dY_for_out_of_bounds — все 5 IX-хелперов нативно (образец 2.3 / N_ADJ_DZ).
+# HL на входе ЖИВОЙ: L = dY (его читает вызывающий после возврата, build/alien8_vec.asm:8238
+# `ld a, l`), H вызывающий не перезаписывает. Поэтому HL паркуется в il_tmp2, а рабочее
+# dY живёт в il_tmp (мл. байт): в цикле `add a, l` (8786) читает L на 2-й и последующих
+# итерациях, значит L обязан нести ТЕКУЩЕЕ dY — держим его в il_tmp, а L правим только на
+# выходах (правкой мл. байта сохранённого HL: `ld (il_tmp2+1),a` / `ld hl,(il_tmp2)`), чтобы
+# A и флаги на выходе остались ровно как у оригинала (ld флаги не трогают).
+# il_tmp+1 — временный A: 0 после `and 0xF0` (нужен целым на выходе bit-теста, куда
+# оригинал возвращает A=0), затем |dY+(ix+2)-128|, затем сумма (на выходе по переносу
+# оригинал возвращает A = сумму). Вызываемый adj_d_for_out_of_bounds (8028-8037) — чистая
+# регистровая, scratch не трогает. Единственный вызывающий adj_for_out_of_bounds парует
+# свои il_tmp2/il_a ДО вызова (8221/8230, 8231/8233) — через вызов живого нет; ISR
+# (vec_isr 11499-11552: vec_scan/vec_zxbuild/vec_joy) в il_* не пишет.
+# Комната 48: 1055 т/итер (5 обращений x ~255 т) -> ~150 т/итер.
+N_ADJ_DY_OOB = """adj_dY_for_out_of_bounds:
+		ld (il_tmp2), hl			; HL жив: L = dY, H нужен вызывающему
+		ld a, l
+		ld (il_tmp), a			; dY — рабочее (L на 2-й итерации читает `add a, l`)
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 12
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+12
+		ld a, (hl)
+		and 0xF0   ; 'ð'
+		jp nz, adj_dY_oob_out		; было ret nz (A цел: and 0xF0)
+		ld (il_tmp+1), a		; A (=0) обязан дожить до выхода из bit-теста
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 7
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+7
+		ld a, (hl)
+		and 1<<0				; bit 0,(ix+7): флаги = and с маской 1 (как у il_ix_bit)
+		jp nz, adj_dY_oob_bit
+		ld a, (room_size_Y)
+		ld b, a
+loc_C622:
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 2
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+2
+		ld a, (il_tmp)
+		add a, (hl)			; было add a, l (L = dY из il_tmp)
+		sub 0x80   ; '
+		jp nc, loc_C62C
+		cpl
+		inc a				; neg (i8080 без NEG) — как в текущей трансляции
+loc_C62C:
+		ld (il_tmp+1), a		; |dY+(ix+2)-128| — ОБЩИЙ store после слияния путей:
+						; на пути nc значение уже в A и его больше неоткуда взять
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 5
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+5
+		ld a, (il_tmp+1)
+		add a, (hl)			; было call il_ix_add / db 5
+		ld (il_tmp+1), a		; сумма: она жива до выхода по переносу (A там = сумма)
+		cp b
+		jp c, adj_dY_oob_c		; было ret c
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 12
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+12
+		ld a, (hl)
+		or 1<<1
+		ld (hl), a			; set 1,(ix+12): ИЛИ маска 2, НЕ A (сумма мертва: следом ld a,(il_tmp))
+		ld a, (il_tmp)
+		call adj_d_for_out_of_bounds
+		ld (il_tmp), a
+		jp nz, loc_C622			; флаги — из вызова, как у оригинального jr nz
+		ld (il_tmp2), a			; L = dY после правки (ld l, a): L — МЛАДШИЙ байт сохранённого
+						; HL, то есть ячейка il_tmp2, а НЕ il_tmp2+1 (там H: little-endian,
+						; доказательство — il_ix_sta читает A из il_f+1 после `push af : pop hl : ld (il_f),hl`)
+		ld hl, (il_tmp2)
+		ret
+adj_dY_oob_bit:
+		ld a, (il_tmp+1)		; A = (ix+12)&0xF0 = 0 — оригинальный bit A не трогал
+		ld hl, (il_tmp2)
+		ret
+adj_dY_oob_c:
+		ld a, (il_tmp)			; dY на момент выхода (L правим в сохранённом HL)
+		ld (il_tmp2), a			; МЛАДШИЙ байт = L (в +1 лежит H, трогать нельзя)
+		ld hl, (il_tmp2)		; H цел, L = dY; флаги — из cp b
+		ld a, (il_tmp+1)		; A = сумма, как у оригинального ret c
+		ret
+adj_dY_oob_out:
+		ld hl, (il_tmp2)
+		ret
+        ; End of function adj_dY_for_out_of_bounds
 """
