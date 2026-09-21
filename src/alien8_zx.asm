@@ -5969,6 +5969,7 @@ set_wipe_and_draw_flags:
 dec_dZ_and_update_XYZ:
         dec (ix+11)
         call adj_for_out_of_bounds
+        ; fallthrough into add_dXYZ (intentional)
         ; End of function dec_dZ_and_update_XYZ
         ; Identical to Knight Lore
         ; =============== S U B R O U T I N E =======================================
