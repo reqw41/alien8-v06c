@@ -61,14 +61,14 @@ if(process.env.A8GAG){ const rdb=a=>memory.bytes[memory.tobank(a&0xffff)];
   for(let a=0x100;a<0xF000&&at<0;a++){let ok=true;for(let i=0;i<pat.length;i++)if(rdb(a+i)!==pat[i]){ok=false;break;}if(ok)at=a;}
   if(at<0)throw new Error("не нашёл seed_3 += mem[seed_2]");
   ow(at+3,0x00,false); }
-let roomSet=false;
+let roomSet=false,roomNo=0;
 memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
   // A8ROOM=<байт>: подменить номер комнаты. Номер лежит в поле +8 объектов 0 и 1 и
   // пишется в init_start_location; retrieve_screen читает его позже (cp (ix+8)), поэтому
   // подменяем САМУ ЗАПИСЬ, пока не загружена первая комната (phase === "init").
-  if(process.env.A8ROOM&&phase==="init"&&(a===L.graphic_objs_tbl+8||a===L.graphic_objs_tbl+40)){
-    w=+process.env.A8ROOM;roomSet=true;}
+  if((a===L.graphic_objs_tbl+8||a===L.graphic_objs_tbl+40)&&phase==="init"){
+    if(process.env.A8ROOM)w=+process.env.A8ROOM;roomSet=true;if(roomNo===0)roomNo=w;}
   if(a===ROOM&&phase==="init"&&w!==0){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){iter++;iterFr.push(FR);iterCy.push(TOT);for(const [k,d] of (inputs[iter]||[]))key(k,d);}
   return ow(a,w,s);};
@@ -137,8 +137,32 @@ if(PC0>=0)console.log(`ограничитель темпа: ${(pcCode/iters).toF
     console.log(`  по тактам (в кадрах): среднее ${meanc.toFixed(3)} мин ${Math.min(...tc).toFixed(3)} макс ${Math.max(...tc).toFixed(3)} СКО ${sd.toFixed(3)}`);
     console.log(`  гистограмма кадров: ${Object.keys(h).map(Number).sort((a,b)=>a-b).map(k=>k+":"+h[k]).join(" ")}`);
     console.log(`  узор (первые 60): ${t.slice(0,60).map(x=>x<10?x:"+").join("")}`); } }
+// ТРИ ЧИСЛА ПРИЁМКИ (решение 4D): медиана/мин/макс — по длительности итерации БЕЗ входа (как в
+// profile_vec.js); вход = E + 1-я итерация; ввод = макс. интервал между сканами клавиатуры.
+{
+  const d=[];for(let i=1;i<iterFr.length;i++)d.push(iterFr[i]-iterFr[i-1]);
+  const t=d.slice(-N).slice(1);
+  if(t.length>0){
+    const sr=[...t].sort((a,b)=>a-b),med=sr[sr.length>>1];
+    console.log(`ПРИЕМКА ${roomNo}: темп медиана ${med.toFixed(3)} кадров/итер (${(3000000/(med*59904)).toFixed(2)} итер/с, мин ${Math.min(...t)} макс ${Math.max(...t)}) | вход в комнату ${iterFr[1]} кадров (${Math.round(iterCy[1])} тактов) | ввод: макс. интервал скана ${maxScanGap} кадров`);
+  }
+}
 const rows_=[];for(let i=0;i<fa.length;i++)if(cyc[i]>0)rows_.push([fnm[i],cyc[i],(i+1<fa.length?fa[i+1]:0x10000)-fa[i],calls[i],hcyc[i]]);
 rows_.sort((a,b)=>b[1]-a[1]);
+// Полная таблица: атрибуция тактов по ПОЛНОМУ списку меток (FL/fln), а не по процедурному подмножеству.
+{
+  const fcyc=new Float64Array(fla.length),fcalls=new Float64Array(fla.length),fhcyc=new Float64Array(fla.length);
+  const i2=new Int32Array(fla.length).fill(-1);
+  for(let j=0;j<fn.length;j++){const i=fidx(fa[j]);if(i>=0){i2[j]=i;fcyc[i]+=cyc[j];fcalls[i]+=calls[j];fhcyc[i]+=hcyc[j];}}
+  let fattr=0;for(let i=0;i<fla.length;i++)fattr+=fcyc[i];
+  const ffree=total-fattr;
+  console.log(`неатрибуцировано ${Math.round(ffree/iters)} тактов/итер`);
+  const fr=[];for(let i=0;i<fla.length;i++)if(fcyc[i]>0)fr.push([fln[i],fcyc[i],(i+1<fla.length?fla[i+1]:0x10000)-fla[i],fcalls[i],fhcyc[i]]);
+  fr.sort((a,b)=>b[1]-a[1]);
+  console.log("Процедура (полный список меток)           тактов%   тактов/итер  байт  вызовов/итер  из них IX-хелперы%");
+  let fact=0;for(const [n,c,sz,cl,hc] of fr.slice(0,+(process.env.A8TOP||40))){fact+=c;console.log(`${n.padEnd(38)} ${(100*c/total).toFixed(1).padStart(6)}%  ${(c/iters).toFixed(0).padStart(10)}  ${String(sz).padStart(5)}  ${(cl/iters).toFixed(1).padStart(8)}  ${hc>0?(100*hc/c).toFixed(0)+'%':''}`);}
+  console.log(`(топ пол. таблицы = ${(100*fact/total).toFixed(1)} %)`);
+}
 console.log("процедура                          тактов%   тактов/итер  байт  вызовов/итер  из них IX-хелперы%");
 let acc=0;for(const [n,c,sz,cl,hc] of rows_.slice(0,+(process.env.A8TOP||40))){acc+=c;console.log(`${n.padEnd(34)} ${(100*c/total).toFixed(1).padStart(6)}%  ${(c/iters).toFixed(0).padStart(10)}  ${String(sz).padStart(5)}  ${(cl/iters).toFixed(1).padStart(8)}  ${hc>0?(100*hc/c).toFixed(0)+'%':''}`);}
 console.log(`(топ = ${(100*acc/total).toFixed(1)} %)`);
