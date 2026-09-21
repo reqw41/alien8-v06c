@@ -152,6 +152,12 @@ zero-page scratch (`il_tmp/il_a/il_f`), Вектор платит vcycles.
 a) правка в tools/a8_vec.py (или a8_z80_to_8080.py) — нативное тело, метка a8_*;
 b) ./build.sh vec                     # гейты плоскостей встроены
 c) ./build.sh lockstep && A8_IX_HOT=1 ./build.sh lockstep   # 3 сценария ×600, обе раскладки
+   # локстеп судит ПАРАМИ «входы + журнал ZX»; неверная пара даёт красный на правильном коде
+   # (проверено: inputs_walk.txt + zx_states600.bin красит HEAD, inputs_alive.txt + он же зелёный)
+   Z=~/projects/alien8-research/zx-stand
+   node tools/lockstep_vec.js build/alien8_8080.r0m build/alien8_8080.sld 600 $Z/inputs_idle.txt $Z/zx_idle600.bin      # покой
+   node tools/lockstep_vec.js build/alien8_8080.r0m build/alien8_8080.sld 600 $Z/inputs_alive.txt $Z/zx_states600.bin   # ходьба (НЕ inputs_walk.txt!)
+   node tools/lockstep_vec.js build/alien8_8080.r0m build/alien8_8080.sld 600 $Z/inputs_safe.txt  $Z/zx_safe600.bin     # осторожный
 d) node tools/profile_vec.js … 150    # по 6 комнатам, не только стартовая
 e) tools/render_gate.sh 803e1d1 150   # картинка байт в байт
 f) окупился → коммит в ixtail + строка в журнал; нет → откат, запись «отвергнуто числами»
