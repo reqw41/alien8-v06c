@@ -2461,7 +2461,7 @@ def a8_glue(src, target):
     assert n_end == 2, n_end
     src = src.replace("ld bc, font", "ld bc, a8_vars_end")
     src = src.replace("ld hl, font\n", "ld hl, a8_vars_end\n")
-    src = a8_native_logic.presub(src)
+    src = a8_native_logic.presub(src, target=target)
     # ---- КОД, ЛЕЖАЩИЙ В ДАННЫХ ----
     # Пролог calc_display_order_and_render (8 байт) спрятан в ХВОСТЕ буфера
     # objects_to_draw и вызывается как `call objects_to_draw+0x40`; tcdev разобрал

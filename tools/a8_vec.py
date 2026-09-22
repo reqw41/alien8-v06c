@@ -1325,7 +1325,7 @@ def glue(src):
     assert n_end == 2, n_end
     src = src.replace("ld bc, font", "ld bc, a8_vars_end")
     src = src.replace("ld hl, font\n", "ld hl, a8_vars_end\n")
-    src = a8_native_logic.presub(src)
+    src = a8_native_logic.presub(src, target='vec')
     # буфер: плоскость 1; за ним — верхний регион кода
     src = _sub(src, r'^        ORG 0xD200\nvidbuf:\n        DS 0x1800\n',
                "vidbuf:         equ %#06x   ; ПЛОСКОСТЬ 1 (столбцовый буфер)\n"

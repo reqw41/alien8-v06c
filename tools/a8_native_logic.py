@@ -18,6 +18,7 @@ Python -> дамп реальных вызовов -> прогон специф�
 Где решение принято перебором, а не замером, — проверка исчерпывающая: дерево классов
 перекрытия сверено со всеми 27 входами таблицы off_C833 программно.
 """
+import os
 import re
 
 # Дополнение к scratch-области 0x0040..0x00A0 обеих целей.
@@ -31,6 +32,36 @@ def _sub(src, pat, repl, name, count=1, flags=re.M):
     src, n = re.subn(pat, lambda m: repl, src, count=count, flags=flags)
     assert n == count, "a8_native_logic: не найдено (%s): %d вместо %d" % (name, n, count)
     return src
+
+
+# ---------------------------------------------------------------------------
+# loc_CDCA (хвост retrieve_screen): 23 × `ld (iy+0),0 : inc iy : djnz`.
+#
+# В трансляции это 23 × (il_iy_stn с обнулением + `inc iy` через il_tmp/z80_iy):
+# стартовая 953 такта/итер, комната 48 — 513. Область ПРЯМАЯ (iy+0..+22 без повторений),
+# а хелпер il_iy_stn таскает ~10 обращений к памяти на каждый обнулённый байт.
+#
+# Нативно (чистый i8080, без Z80-форм): пролог сохраняет HL в il_tmp, hl=(z80_iy) —
+# база, записанная хелпером add iy,bc выше; тело — цикл `ld (hl),a : inc hl` +
+# `dec b : jp nz` (джвнз на i8080 — то же, что уже делает транслятор); эпилог пишет
+# (z80_iy)=hl=база+23 (как и в оригинале) и восстанавливает HL из il_tmp.
+# HL на входе мёртв: следующие две команды оригинала используют HL через ex de,hl,
+# но HL в цикл заходит как (z80_iy), а в начале restore из il_tmp возвращает входное HL.
+# ~953 -> ~25 (стартовая), ~513 -> ~25 (комната 48).
+# ---------------------------------------------------------------------------
+N_ZERO_COPY = """\t\tld (il_tmp),hl
+\t\tld hl,(z80_iy)
+\t\tld a, 0
+\t\tld b, 0x17
+loc_CDCA:
+\t\tld (hl), a
+\t\tinc hl
+\t\tdec b
+\t\tjp nz, loc_CDCA
+\t\tld (z80_iy),hl
+\t\tld hl,(il_tmp)
+"""
+
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +106,8 @@ def scratch(src):
     return _sub(src, r'^__A8_NATIVE_SCRATCH__', SCRATCH.rstrip('\n'), 'место под scratch')
 
 
-def presub(src):
-    """Правки на тексте Z80 ДО трансляции. Вызывать ПОСЛЕ подстановок font -> a8_vars_end."""
+def presub(src, target='vec'):
+    """Правки на тексте Z80 ДО трансляции. target: 'vec' (полный) или 'lockstep' (1:1)."""
     # 1) считать границу при загрузке комнаты
     src = _sub(src, r'^zero_end_of_graphic_objs_tbl:\n', _NOBJ_HEAD, 'голова zero_end')
     src = _sub(src, r'^        jr zero_end_of_graphic_objs_tbl\n',
@@ -101,6 +132,11 @@ def presub(src):
     src = _sub(src, r'^        ld bc, a8_vars_end   ; end of table\?\n',
                "        ld bc, (a8_objend)   ; A8: конец ЗАНЯТОЙ части таблицы (было: конец таблицы)\n",
                'конец таблицы в ret_from_tbl_jp')
+    # 2) copy-цикл loc_CDCA (хвост retrieve_screen): нативная пересылка.
+    #     Только для цели vec: lockstep обязан идти 1:1 с оригиналом.
+    if target == 'vec':
+        src = _sub(src, r'^        ld b, 0x17\nloc_CDCA:\n        ld \(iy\+0\), 0\n        inc iy\n        djnz loc_CDCA\n',
+                   N_ZERO_COPY, 'нулевой хвост graphic_objs_tbl (loc_CDCA)')
     return src
 
 
@@ -116,6 +152,8 @@ _BODIES = [
     ('sub_AE03', 'N_SUB_AE03'),
     ('adj_dY_for_obj_intersect', 'N_ADJ_DY'),
     ('adj_dZ_for_obj_intersect', 'N_ADJ_DZ'),
+    ('adj_dY_for_out_of_bounds', 'N_ADJ_DY_OOB'),
+    ('is_obj_moving', 'N_IS_OBJ_MOVING'),
 ]
 
 # Блоки, конец которых задан следующей меткой, а не комментарием «End of function».
@@ -125,6 +163,7 @@ _RANGES = [
     ('upd_02', 'sub_C082', 'N_UPD_02'),
     ('wipe_next_object', 'loc_CF5F', 'N_WIPE'),
     ('upd_2D', 'upd_48_4B', 'N_UPD_2D'),
+    ('loc_A72E', 'loc_A741', 'N_A72E'),
 ]
 
 
@@ -1664,66 +1703,157 @@ adz_lp:
 adz_z:
 		call do_objs_intersect_on_z
 		jp nc, adz_nx
-		call il_ix_set
-		db 12, 1<<2
-		call il_ix_lda
-		db 13
-		rrca
-		and 0x40
-		call il_iy_or
-		db 13
-		call il_iy_sta
-		db 13
-		rlca
-		and 0x40
-		call il_ix_or
-		db 13
-		call il_ix_sta
-		db 13
-		call il_ix_bit
-		db 7, 1<<2
-		jp z, adz_h9
-		call il_ix_lda
-		db 0
-		sub 0x10
-		cp 0x20
-		jp nc, adz_h7
-		push af
+		; Инлайн шага 2.3 (образец ixrest): scratch — только A/HL и ячейки il_tmp/il_tmp2.
+		; HL=координаты игрока паркуем в il_tmp2 (adz_h9 читает ld a,h / ld h,a);
+		; DE=указатель записи, C=мл. координата (её читает do_objs_intersect_on_x), B=счётчик.
 		ld (il_tmp2),hl
-		ld hl,(z80_iy)
+		ld hl,(z80_ix)
 		ld a,l
-		add a,(13)&255
+		add a,12
 		ld l,a
 		ld a,h
-		adc a,((13)>>8)&255
-		ld h,a
+		adc a,0
+		ld h,a				; -> ix+12
+		ld a,(hl)
+		or 1<<2
+		ld (hl),a				; set 2,(ix+12)
+		inc hl					; -> ix+13
+		ld a,(hl)
+		rrca
+		and 0x40				; v1 = бит7(ix+13) как 0x40
+		ld (il_tmp),a
+		ld hl,(z80_iy)
+		ld a,l
+		add a,13
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+13
+		ld a,(il_tmp)
+		or (hl)
+		ld (hl),a				; (iy+13) |= v1
+		; store (ix+13) ЖИВОЙ: rlca/and 0x40 идут после or (iy+13) — v2 = бит5
+		; объединённого значения (бит6(ix+13) | бит5(iy+13)) как 0x40.
+		rlca
+		and 0x40
+		ld (il_tmp),a
+		ld hl,(z80_ix)
+		ld a,l
+		add a,13
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+13
+		ld a,(il_tmp)
+		or (hl)
+		ld (hl),a				; (ix+13) |= v2
+		ld hl,(z80_ix)
+		ld a,l
+		add a,7
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+7
+		ld a,(hl)
+		and 1<<2
+		jp nz, adz_z_go
+		ld hl,(il_tmp2)
+		jp adz_h9
+adz_z_go:
+		ld a,l
+		sub 7
+		ld l,a
+		ld a,h
+		sbc a,0
+		ld h,a				; -> ix+0
+		ld a,(hl)
+		sub 0x10
+		cp 0x20
+		jp nc, adz_z_h7
+		ld (il_tmp),hl			; сохранить ix+0
+		ld hl,(z80_iy)
+		ld a,l
+		add a,13
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+13
 		ld a,(hl)
 		or 1<<3
-		ld (hl),a
-		ld hl,(il_tmp2)
-		pop af
+		ld (hl),a				; set 3,(iy+13)
+		ld hl,(il_tmp)
+adz_z_h7:
+		ld hl,(il_tmp2)				; координаты обратно в HL перед adz_h7
 adz_h7:
-		call il_ix_lda
-		db 11
-		call il_iy_sta
-		db 11
-		call il_ix_lda
-		db 9
+		; (iy+11)=(ix+11); затем (ix+9)==0 -> (ix+9)=(iy+9)
+		ld (il_tmp2),hl
+		ld hl,(z80_ix)
+		ld a,l
+		add a,11
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+11
+		ld a,(hl)
+		ld (il_tmp),a
+		ld hl,(z80_iy)
+		ld a,l
+		add a,11
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+11
+		ld a,(il_tmp)
+		ld (hl),a
+		ld hl,(z80_ix)
+		ld a,l
+		add a,9
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+9
+		ld a,(hl)
 		and a
-		jp nz, adz_h8
-		call il_iy_lda
-		db 9
-		call il_ix_sta
-		db 9
+		jp nz, adz_h7_r8
+		ld (il_tmp),hl			; сохранить ix+9
+		ld hl,(z80_iy)
+		ld a,l
+		add a,9
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+9
+		ld a,(hl)
+		ld hl,(il_tmp)			; назад на ix+9
+		ld (hl),a
+adz_h7_r8:
+		ld hl,(il_tmp2)				; координаты — adz_h8 припаркует сам
 adz_h8:
-		call il_ix_lda
-		db 10
+		; (ix+10)==0 -> (ix+10)=(iy+10)
+		ld (il_tmp2),hl
+		ld hl,(z80_ix)
+		ld a,l
+		add a,10
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> ix+10
+		ld a,(hl)
 		and a
-		jp nz, adz_h9
-		call il_iy_lda
-		db 10
-		call il_ix_sta
-		db 10
+		jp nz, adz_h8_r9
+		ld (il_tmp),hl			; сохранить ix+10
+		ld hl,(z80_iy)
+		ld a,l
+		add a,10
+		ld l,a
+		ld a,h
+		adc a,0
+		ld h,a				; -> iy+10
+		ld a,(hl)
+		ld hl,(il_tmp)			; назад на ix+10
+		ld (hl),a
+adz_h8_r9:
+		ld hl,(il_tmp2)				; координаты перед adz_h9
 adz_h9:
 		ld a, h
 		call adj_d_for_out_of_bounds
@@ -1751,4 +1881,164 @@ adz_st:
 		ex de, hl
 		ret
         ; End of function adj_dZ_for_obj_intersect
+"""
+
+
+# Шаг 2.4: adj_dY_for_out_of_bounds — все 5 IX-хелперов нативно (образец 2.3 / N_ADJ_DZ).
+# HL на входе ЖИВОЙ: L = dY (его читает вызывающий после возврата, build/alien8_vec.asm:8238
+# `ld a, l`), H вызывающий не перезаписывает. Поэтому HL паркуется в il_tmp2, а рабочее
+# dY живёт в il_tmp (мл. байт): в цикле `add a, l` (8786) читает L на 2-й и последующих
+# итерациях, значит L обязан нести ТЕКУЩЕЕ dY — держим его в il_tmp, а L правим только на
+# выходах (правкой мл. байта сохранённого HL: `ld (il_tmp2+1),a` / `ld hl,(il_tmp2)`), чтобы
+# A и флаги на выходе остались ровно как у оригинала (ld флаги не трогают).
+# il_tmp+1 — временный A: 0 после `and 0xF0` (нужен целым на выходе bit-теста, куда
+# оригинал возвращает A=0), затем |dY+(ix+2)-128|, затем сумма (на выходе по переносу
+# оригинал возвращает A = сумму). Вызываемый adj_d_for_out_of_bounds (8028-8037) — чистая
+# регистровая, scratch не трогает. Единственный вызывающий adj_for_out_of_bounds парует
+# свои il_tmp2/il_a ДО вызова (8221/8230, 8231/8233) — через вызов живого нет; ISR
+# (vec_isr 11499-11552: vec_scan/vec_zxbuild/vec_joy) в il_* не пишет.
+# Комната 48: 1055 т/итер (5 обращений x ~255 т) -> ~150 т/итер.
+N_ADJ_DY_OOB = """adj_dY_for_out_of_bounds:
+		ld (il_tmp2), hl			; HL жив: L = dY, H нужен вызывающему
+		ld a, l
+		ld (il_tmp), a			; dY — рабочее (L на 2-й итерации читает `add a, l`)
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 12
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+12
+		ld a, (hl)
+		and 0xF0   ; 'ð'
+		jp nz, adj_dY_oob_out		; было ret nz (A цел: and 0xF0)
+		ld (il_tmp+1), a		; A (=0) обязан дожить до выхода из bit-теста
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 7
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+7
+		ld a, (hl)
+		and 1<<0				; bit 0,(ix+7): флаги = and с маской 1 (как у il_ix_bit)
+		jp nz, adj_dY_oob_bit
+		ld a, (room_size_Y)
+		ld b, a
+loc_C622:
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 2
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+2
+		ld a, (il_tmp)
+		add a, (hl)			; было add a, l (L = dY из il_tmp)
+		sub 0x80   ; '
+		jp nc, loc_C62C
+		cpl
+		inc a				; neg (i8080 без NEG) — как в текущей трансляции
+loc_C62C:
+		ld (il_tmp+1), a		; |dY+(ix+2)-128| — ОБЩИЙ store после слияния путей:
+						; на пути nc значение уже в A и его больше неоткуда взять
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 5
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+5
+		ld a, (il_tmp+1)
+		add a, (hl)			; было call il_ix_add / db 5
+		ld (il_tmp+1), a		; сумма: она жива до выхода по переносу (A там = сумма)
+		cp b
+		jp c, adj_dY_oob_c		; было ret c
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 12
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+12
+		ld a, (hl)
+		or 1<<1
+		ld (hl), a			; set 1,(ix+12): ИЛИ маска 2, НЕ A (сумма мертва: следом ld a,(il_tmp))
+		ld a, (il_tmp)
+		call adj_d_for_out_of_bounds
+		ld (il_tmp), a
+		jp nz, loc_C622			; флаги — из вызова, как у оригинального jr nz
+		ld (il_tmp2), a			; L = dY после правки (ld l, a): L — МЛАДШИЙ байт сохранённого
+						; HL, то есть ячейка il_tmp2, а НЕ il_tmp2+1 (там H: little-endian,
+						; доказательство — il_ix_sta читает A из il_f+1 после `push af : pop hl : ld (il_f),hl`)
+		ld hl, (il_tmp2)
+		ret
+adj_dY_oob_bit:
+		ld a, (il_tmp+1)		; A = (ix+12)&0xF0 = 0 — оригинальный bit A не трогал
+		ld hl, (il_tmp2)
+		ret
+adj_dY_oob_c:
+		ld a, (il_tmp)			; dY на момент выхода (L правим в сохранённом HL)
+		ld (il_tmp2), a			; МЛАДШИЙ байт = L (в +1 лежит H, трогать нельзя)
+		ld hl, (il_tmp2)		; H цел, L = dY; флаги — из cp b
+		ld a, (il_tmp+1)		; A = сумма, как у оригинального ret c
+		ret
+adj_dY_oob_out:
+		ld hl, (il_tmp2)
+		ret
+        ; End of function adj_dY_for_out_of_bounds
+"""
+
+
+# ---------------------------------------------------------------------------
+# Шаг 2.5a: is_obj_moving — три IX-хелпера (`ld a,(ix+9) : or (ix+10) : or (ix+11)`) нативно.
+# Поля dX/dY/dZ — соседние байты записи, поэтому один указатель и два `inc hl` вместо трёх
+# походов к z80_ix: инкремент не трогает ни A, ни флаги, значит флаги на выходе ставит
+# последний `or (hl)` — ровно как у оригинала. HL паркуется ЦЕЛИКОМ в il_tmp2 (как делали
+# il_*), припаркованное слово по байту не правим. Комната 48: 669 т/итер хелперов.
+# ---------------------------------------------------------------------------
+N_IS_OBJ_MOVING = """is_obj_moving:
+		ld (il_tmp2), hl			; HL жив: его сохраняли il_ix_lda/il_ix_or
+		ld hl, (z80_ix)
+		ld a, l
+		add a, 9
+		ld l, a
+		ld a, h
+		adc a, 0
+		ld h, a				; -> ix+9 (dX)
+		ld a, (hl)
+		inc hl					; -> ix+10: инкремент НЕ трогает A и флаги,
+		or (hl)					;   поля dX/dY/dZ лежат подряд (ix+9..ix+11)
+		inc hl					; -> ix+11
+		or (hl)					; | dZ: флаги на выходе — от OR, как у оригинала
+		ld hl, (il_tmp2)			; HL целиком (не по байту! little-endian: L в il_tmp2, H в +1)
+		ret
+        ; End of function is_obj_moving
+"""
+
+# ---------------------------------------------------------------------------
+# Шаг 2.5b: loc_A72E — `ld ix, graphic_objs_tbl : ld a,(ix+0) : or (ix+32)` нативно.
+# IX = константа, значит (ix+32) — это абсолютный graphic_objs_tbl+32 (записи 32-байтные,
+# ASSERT (graphic_objs_tbl & 31) == 8), и A не нужно прятать под адресом: HL перезагружается
+# иммедиатом. Записи — только il_tmp (целым словом) и z80_ix. Прятать A в il_tmp+1 НЕЛЬЗЯ:
+# туда кладётся старший байт припаркованного HL (little-endian) — рецензент поймал именно
+# эту строку. Стартовый профиль: 477 т/итер хелперов, вызывается каждый игровой кадр.
+# Тело ЗАМЕНЯЕТ состояние ПОСЛЕ a8_sound_ay.apply: этот сайт вшит в a8_glue, то есть в
+# presub, и отрабатывает ДО a8_native_logic.apply. Значит вторая строка `call msx_frame_off`
+# обязана быть В ТЕЛЕ, иначе глушение AY в конце итерации тихо исчезает: локстеп (игровые
+# переменные) и гейт картинки этого не видят, видят tunecheck/aycheck.
+# ---------------------------------------------------------------------------
+N_A72E = """loc_A72E:
+        call msx_frame_off   ; MSX 0x41A3: глушение AY в конце игрового кадра
+        call audio_CE22
+	ld (il_tmp), hl			; HL жив: его сохраняли il_*
+	ld hl, graphic_objs_tbl
+	ld (z80_ix), hl		; было `ld ix, graphic_objs_tbl`: IX читается и другими процедурами,
+	ld a, (hl)			;   (ix+0) = graphic_no первой записи — берём тем же указателем
+	ld hl, graphic_objs_tbl+32
+	or (hl)					; | (ix+32): флаги на выходе — от OR, как у оригинала
+	ld hl, (il_tmp)			; HL ЦЕЛИКОМ: L лежит в il_tmp, H в il_tmp+1, по байту не правим
+        jp z, player_dies
+        jp onscreen_loop
+        ; ---------------------------------------------------------------------------
 """
