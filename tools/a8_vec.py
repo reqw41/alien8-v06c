@@ -1707,6 +1707,91 @@ def header():
     return VEC_HEADER % {'stack': A8_STACK_SYM}
 
 
+# ---- релизная заставка (A8_SPLASH=1) ---------------------------------------
+# Данные (tools/a8_splash.py) лежат в образе по 0x8000 — плоскость 0 в раскладке
+# Вектора (адрес = столбец*256 + 32 + Y, Y вверх; экран = буфер - 0x2000).
+# vec_boot вместо своего цикла очистки прыгает в a8_splash_cont (jp вместо
+# ld hl,imm — те же 3 байта, блок Вектора НЕ растёт): показать 8K, ждать любую
+# клавишу, очистить плоскость 0 (как vec_boot делал всегда) и jp START.
+# Вставки делает splash_layout() — ПОСЛЕДНИМ шагом, после a8_pack_holes и
+# a8_layout_upper: те раскладывают блоки по ДЛИНАМ текста и видят маркер
+# нижнего региона; вложенные в tail() строки уводили маркер за собой
+# (замер 2026-09-22: vec_boot уезжал на 0x74E5 вместо 0xC5E0).
+_SPLASH_CLR = "\t\t\t\tld\t\thl, 0x8000\t\t\t; очистить плоскость 0 (экран)\n"
+_SPLASH_JMP = "\t\t\t\tjp\t\ta8_splash_cont\t\t; заставка: показать/ждать/очистить (нижний регион)\n"
+_SPLASH_MARKER = "        ASSERT $ <= 0x7700   ; нижний регион не должен дорасти до стека\n"
+_SPLASH_CONT = (
+    "; ---- релизная заставка: показать 8K из плоскости 0, ждать клавишу ----\n"
+    "; вход из vec_boot: порты и палитра готовы, ei включён. Выход: плоскость 0\n"
+    "; очищена (как без заставки) и jp START. Копируем ПОЛИБАЙТНО ПО СТОЛБЦОВ,\n"
+    "; только строки 32..223: в промежутках 0..31/224..255 каждого столбца буфера\n"
+    "; лежат мелкие процедуры (дыры вне картинки, 2044 Б из 2048) — сплошное\n"
+    "; копирование 8K стёрло бы их и уронило игру на первом же вызове (замер\n"
+    "; 2026-09-22: pc уехал в 0xFFxx, стек обнулился). Раскладка vidbuf та же,\n"
+    "; что у 0x8000: адрес = база + столбец*256 + 32 + Y, Y растёт вверх.\n"
+    "a8_splash_cont:\n"
+    "\t\t\t\tld\t\tb, 32\t\t\t; столбцов\n"
+    "\t\t\t\tld\t\thl, 0x8000+32\t; заставка: 32 столбца по 192 Б в vidbuf\n"
+    "\t\t\t\tld\t\tde, 0xA000+32\n"
+    "a8_sp_col:\t\t\tld\t\tc, 192\n"
+    "a8_sp_cp:\t\t\tld\t\ta, (hl)\n"
+    "\t\t\t\tld\t\t(de), a\n"
+    "\t\t\t\tinc\t\thl\n"
+    "\t\t\t\tinc\t\tde\n"
+    "\t\t\t\tdec\t\tc\n"
+    "\t\t\t\tjp\t\tnz, a8_sp_cp\n"
+    "\t\t\t\tld\t\ta, l\t\t\t; следующий столбец: +64 от конца 192-го байта\n"
+    "\t\t\t\tadd\t\ta, 64\t\t\t; (E0+40=120h), перенос добирать adc\n"
+    "\t\t\t\tld\t\tl, a\n"
+    "\t\t\t\tld\t\ta, h\n"
+    "\t\t\t\tadc\t\ta, 0\n"
+    "\t\t\t\tld\t\th, a\n"
+    "\t\t\t\tld\t\ta, e\n"
+    "\t\t\t\tadd\t\ta, 64\n"
+    "\t\t\t\tld\t\te, a\n"
+    "\t\t\t\tld\t\ta, d\n"
+    "\t\t\t\tadc\t\ta, 0\n"
+    "\t\t\t\tld\t\td, a\n"
+    "\t\t\t\tdjnz\t\ta8_sp_col\n"
+    "a8_sp_key:\t\t\tcall\ta8_anykey\t\t; ждём любую клавишу (ряды vkbd + джойстик)\n"
+    "\t\t\t\tjp\t\tz, a8_sp_key\n"
+    "\t\t\t\tld\t\thl, 0x8000\t\t; очистить плоскость 0 (экран), как vec_boot без заставки\n"
+    "\t\t\t\tld\t\tbc, 0x2000\n"
+    "a8_sp_clr:\t\t\tld\t\t(hl), 0\n"
+    "\t\t\t\tinc\t\thl\n"
+    "\t\t\t\tdec\t\tbc\n"
+    "\t\t\t\tld\t\ta, b\n"
+    "\t\t\t\tor\t\tc\n"
+    "\t\t\t\tjp\t\tnz, a8_sp_clr\n"
+    "\t\t\t\tjp\t\tSTART\n"
+)
+
+
+def splash_layout(src):
+    """Последний шаг цели vec (env A8_SPLASH): редирект той же длиной + код и
+    данные заставки. До a8_pack_holes/a8_layout_upper текст не трогаем."""
+    if src.count(_SPLASH_CLR) != 1:
+        raise SystemExit("a8_splash: якорь цикла очистки в vec_boot не найден однократно")
+    if src.count(_SPLASH_MARKER) != 1:
+        raise SystemExit("a8_splash: ASSERT нижнего региона не найден однократно")
+    src = src.replace(_SPLASH_CLR, _SPLASH_JMP, 1)
+    src = src.replace(_SPLASH_MARKER, _SPLASH_CONT + _SPLASH_MARKER, 1)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "alien8_splash.bin")
+    data = open(path, "rb").read()
+    if len(data) != 8192:
+        raise SystemExit("a8_splash: src/alien8_splash.bin должен быть 8192 байта (сначала tools/a8_splash.py)")
+    lines = ["\n        ORG 0x8000              ; релизная заставка: 8192 Б в раскладке плоскости 0\n"
+             "a8_splash:\n"]
+    for i in range(0, 8192, 16):
+        lines.append("        DB " + ", ".join(f"0x{b:02X}" for b in data[i:i + 16]) + "\n")
+    lines.append("        ASSERT a8_splash + 8192 <= 0xA000   ; заставка не должна налезть на vidbuf\n")
+    db = "".join(lines)
+    src, n = re.subn(r'^        SAVEBIN [^\n]*$', lambda m: db + m.group(0), src, count=1, flags=re.M)
+    if n != 1:
+        raise SystemExit("a8_splash: строка SAVEBIN не найдена")
+    return src
+
+
 def tail():
     t = VEC_TAIL
     t = t.replace("__VEC_KBZX__", _kbzx_table(t), 1)

@@ -2390,8 +2390,9 @@ def a8_vec_glue(src):
     src = a8_vec.glue_i8080(src)       # print_sprite: счётчик строк, вход в цепочку, бюджет di
     src = src.replace("        DEVICE ZXSPECTRUM48\n",
                       "        DEVICE ZXSPECTRUM48\n" + a8_vec.header() + _LDIR_HELPERS + "\n", 1)
+    bin_name = os.environ.get("A8_BIN", "build/alien8_vec.r0m")
     src = re.sub(r'^\s*SAVEBIN[^\n]*$', a8_vec.tail().replace("\\", "\\\\") +
-                 '\n        SAVEBIN "build/alien8_vec.r0m", 0, 0x10000', src, count=1, flags=re.M)
+                 f'\n        SAVEBIN "{bin_name}", 0, 0x10000', src, count=1, flags=re.M)
     return src
 
 
@@ -2585,6 +2586,10 @@ def main():
         src, hmoved, hblk, hole_desc = a8_pack_holes(src, A8_HOLES, A8_HOLE_BYTES, A8_HOLE_SKIP)
         if os.environ.get('A8_HUD_LAYOUT', 'on') != 'off':
             src, hud_desc = a8_layout_upper(src, A8_HUD_WINDOWS)
+        # заставка — ПОСЛЕ раскладки дыр и верхнего региона (см. a8_vec.splash_layout)
+        if os.environ.get('A8_SPLASH'):
+            import a8_vec
+            src = a8_vec.splash_layout(src)
     open(outp, 'w', encoding='utf-8').write(src)
     print(f'{inp} -> {outp} (цель {target}); IX-хелперов {len(_ix_used)}; exx-пар {exx_pairs}'
           + (f'; ограничитель темпа: {pace_desc}' if pace_desc else '')

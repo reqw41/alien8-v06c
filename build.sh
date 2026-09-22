@@ -2,6 +2,7 @@
 # Сборка Alien 8.
 #   ./build.sh zx        — исходная ZX-версия из листинга tcdev + гейт «байт в байт с оригиналом»
 #   ./build.sh lockstep  — рекомпиляция в i8080, логика 1:1, вывод заглушен (для локстепа)
+#   ./build.sh release   — цель vec + релизная заставка на старте (ждёт клавишу); гейты не здесь
 set -e
 cd "$(dirname "$0")"
 TARGET=${1:-zx}
@@ -34,6 +35,19 @@ elif [ "$TARGET" = "vec" ]; then
   python3 tools/check_plane1.py build/alien8_vec.lst --walk build/alien8_vec.asm
   python3 tools/check_plane2.py build/alien8_vec.lst --walk build/alien8_vec.asm
   ls -la build/alien8_vec.r0m
+elif [ "$TARGET" = "release" ]; then
+  # Релизная сборка: заставка из src/alien8_title.jpg показывается на старте до меню.
+  # Отдельный образ (build/alien8_release.r0m), гейты гоняются на цели vec.
+  [ -f src/alien8_splash.bin ] || python3 tools/a8_splash.py
+  A8_SPLASH=1 A8_BIN=build/alien8_release.r0m \
+    python3 tools/a8_z80_to_8080.py src/alien8_zx.asm build/alien8_release.asm --target vec
+  ./tools/sjasmplus --lst=build/alien8_release.lst --sld=build/alien8_release.sld --fullpath build/alien8_release.asm
+  python3 tools/check_i8080.py build/alien8_release.lst
+  python3 tools/check_ixflags.py build/alien8_release.asm
+  python3 tools/check_djnz.py build/alien8_release.asm
+  python3 tools/check_plane1.py build/alien8_release.lst --walk build/alien8_release.asm
+  python3 tools/check_plane2.py build/alien8_release.lst --walk build/alien8_release.asm
+  ls -la build/alien8_release.r0m
 else
   echo "неизвестная цель: $TARGET"; exit 1
 fi
