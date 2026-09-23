@@ -1318,7 +1318,7 @@ def glue(src):
                "        ASSERT (graphic_objs_tbl & 31) == 8   ; следствие: записи 32-байтные, поля\n"
                "                                              ; адресуются младшим байтом без переноса\n"
                "                                              ; (ASSERT'ы в a8_native_logic.py)\n"
-               "        ASSERT seed_1 - %#06x >= 0x40   ; под стеком обязан остаться буфер (замер: 68 Б)\n"
+               "        ASSERT seed_1 - %#06x >= 0x44   ; под стеком обязан остаться буфер (замер spcheck_vec.js: 68 Б = 0x44)\n"
                "        ORG 0x0100   ; НИЖНИЙ регион: код и данные игры\nfont:"
                % (A8_PLANE0, A8_CODE_TOP), 'код')
     n_end = src.count("ld bc, font") + src.count("ld hl, font\n")
