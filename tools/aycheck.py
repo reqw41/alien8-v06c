@@ -75,6 +75,7 @@ class Model:
         self.nctl = [0, 0, 0]
         self.nld = [0, 0, 0]
         self.vdiv = [0, 0, 0]
+        self.lad = 0
 
     def drain(self):
         for _t, r, v in self.e.log:
@@ -114,13 +115,15 @@ class Model:
             self.busy = 0
 
     def ladder(self):                    # audio_msx_ladder: мимо движка, прямо в зеркало
-        self.e.mix &= 0xFE
+        self.e.mix &= 0xFE               # msx_tone_on слота 0 (тень R7 остаётся с тоном A)
         self.regs[7] = self.e.mix
-        for b in range(8, 0, -1):
-            self.regs[0] = ((b - 1) << 4) & 0xFF
-            self.regs[1] = 0
-            self.regs[8] = 0x0F
-        self.regs[8] = 0
+        self.lad = 8                     # ступени B = 8..1, слив (VF) после каждой
+
+    def ladder_step(self):
+        b = self.lad
+        self.regs[0] = ((b - 1) << 4) & 0xFF     # период (B-1)*16
+        self.regs[1] = 0
+        self.regs[8] = 0x0F
 
     # ---- слив (msx_viflush) ----
     def tone(self, c):
@@ -159,6 +162,18 @@ class Model:
         return self.tone(c)
 
     def flush(self):
+        """msx_viflush. Тишину (msx_silence) после слива делает вызыватель — msx_frame_off."""
+        last = False
+        if self.lad:
+            self.ladder_step()
+            self.lad -= 1
+            last = self.lad == 0
+        w = self._flush()
+        if last:
+            self.regs[8] = 0                     # лесенка: `xor a / call msx_setvol` на выходе
+        return w
+
+    def _flush(self):
         act = [self.vcalc(c) for c in range(3)]
         w = [FF, 1 if act[1] else FF, 2 if act[2] else FF]
         if act[0]:
@@ -183,7 +198,6 @@ class Model:
                 self.cache[c] = d
                 self.nld[c] += 1
                 self.eff[c] = d
-        self.silence()
         return w
 
 
@@ -204,30 +218,54 @@ def main():
     live = {}                             # слот -> id эффекта, для учёта «кто звучал»
     nsfx = nsfxi = nlad = 0
     ntk = 0
-    prev_busy_fl = 0
+    prev_busy_it = 0
+    pend_sil = False                      # FL был, его слив (VF) ещё не пришёл
+    nfl_lad = 0
+    vopen = False                         # слив начат (VF), итог (VE) ещё не пришёл
+    vexp = None
+    nfr_open = 0
     tk_full = tk_bad = 0
     lines = [ln.split() for ln in open(sys.argv[1], encoding='utf-8')]
 
+    # Сверка кадра: делитель на конец кадра (V) и НАКОПИТЕЛЬНОЕ число управляющих слов и
+    # загрузок (P) — накопительно, потому что слив может перейти границу кадра: в кадре, на конец
+    # которого слив открыт (VF без VE), кадр не сверяется, но его записи учтутся в следующем.
+    # Кадры мелодий не сверяются; после них счёт модели выравнивается по журналу.
+    cum_tr = {1: [0, 0], 2: [0, 0]}
+    cum_md = {1: [0, 0], 2: [0, 0]}
+
     def check_frame(f):
-        nonlocal bad, shown, nfr, nfr_snd
+        nonlocal bad, shown, nfr, nfr_snd, nfr_open
         o = obs.pop(f, None)
         if o is None:
             return
-        if started and not tframe:
-            nfr += 1
-            if m.eff[1] or m.eff[2]:
-                nfr_snd += 1
-            for c in (1, 2):
-                v, k, ld = o.get(c, [None, 0, 0])
-                exp = (m.eff[c], m.nctl[c], m.nld[c])
-                if (v, k, ld) != exp:
-                    bad += 1
-                    if shown < 12:
-                        shown += 1
-                        print('  кадр %d счётчик %d: у нас делитель %s упр %d загр %d; модель %d упр %d загр %d'
-                              % (f, c, v, k, ld, exp[0], exp[1], exp[2]))
+        for c in (1, 2):
+            _v, k, ld = o.get(c, [None, 0, 0])
+            cum_tr[c][0] += k
+            cum_tr[c][1] += ld
+            cum_md[c][0] += m.nctl[c]
+            cum_md[c][1] += m.nld[c]
         m.nctl = [0, 0, 0]
         m.nld = [0, 0, 0]
+        if not started or tframe:
+            for c in (1, 2):
+                cum_md[c] = list(cum_tr[c])
+            return
+        if vopen:
+            nfr_open += 1
+            return
+        nfr += 1
+        if m.eff[1] or m.eff[2]:
+            nfr_snd += 1
+        for c in (1, 2):
+            v = o.get(c, [None])[0]
+            if v != m.eff[c] or cum_tr[c] != cum_md[c]:
+                bad += 1
+                if shown < 12:
+                    shown += 1
+                    print('  кадр %d счётчик %d: у нас делитель %s, упр/загр с начала %s; модель %d, %s'
+                          % (f, c, v, cum_tr[c], m.eff[c], cum_md[c]))
+                cum_md[c] = list(cum_tr[c])          # одно расхождение — одна жалоба
 
     # V/P-строки кадра f идут в журнале в конце кадра, после событий кадра: копим и сверяем
     # по приходу V счётчика 2 (последняя строка итога кадра, P печатается между V1 и V2)
@@ -264,18 +302,15 @@ def main():
             m.mute()
         elif t == 'INIT':
             m.init()
-        elif t in ('ITER', 'TK', 'FL'):
+        elif t in ('ITER', 'TK', 'FL', 'VF', 'VE'):
             started = True
             if t == 'TK':
                 ntk += 1
                 m.tick()
-            elif t == 'FL':
-                if playing:
-                    continue
-                nfl += 1
-                # число тиков итерации: если движок был занят весь объектный цикл (занят на
-                # прошлом сливе и занят сейчас), тиков ровно 56
-                if prev_busy_fl and m.busy:
+            elif t == 'ITER':
+                # тики итерации: объектный цикл лежит между двумя ITER-строками. Если движок был
+                # занят весь цикл (занят на прошлой ITER и занят сейчас), тиков ровно 56
+                if prev_busy_it and m.busy:
                     tk_full += 1
                     if ntk != TICKS:
                         tk_bad += 1
@@ -288,13 +323,47 @@ def main():
                     bad += 1
                     print('  кадр %s: за итерацию тиков %d > %d' % (p[1], ntk, TICKS))
                 ntk = 0
+                prev_busy_it = m.busy
+            elif t == 'FL':
+                if m.lad:
+                    bad += 1
+                    print('  кадр %s: лесенка кончилась, а сливов в ней %d из 8' % (p[1], 8 - m.lad))
+                    m.lad = 0
+                if playing:
+                    continue
+                if pend_sil:
+                    bad += 1
+                    print('  кадр %s: msx_frame_off без слива в предыдущей итерации' % p[1])
+                pend_sil = True
+            elif t == 'VE':
+                vopen = False
+                got = [int(x) for x in p[2:8]]
+                if got != vexp:
+                    bad += 1
+                    if shown < 12:
+                        shown += 1
+                        print('  слив кадра %s: у нас д1 д2 у1 з1 у2 з2 = %s; модель %s' % (p[1], got, vexp))
+            else:                                          # VF: слив
+                vopen = True
+                c0 = (m.nctl[1], m.nld[1], m.nctl[2], m.nld[2])
+                lad = m.lad
+                if not pend_sil and not lad:
+                    bad += 1
+                    print('  кадр %s: слив вне msx_frame_off и вне лесенки' % p[1])
+                nfl += 1
                 w = m.flush()
+                vexp = [m.eff[1], m.eff[2], m.nctl[1] - c0[0], m.nld[1] - c0[1],
+                        m.nctl[2] - c0[2], m.nld[2] - c0[3]]
+                if lad:
+                    nfl_lad += 1
+                if pend_sil:
+                    m.silence()
+                    pend_sil = False
                 if w[1] != FF or w[2] != FF:
                     nfl_snd += 1
                     for c in (1, 2):
-                        if w[c] != FF and w[c] in live:
-                            heard.add(live[w[c]])
-                prev_busy_fl = m.busy
+                        if w[c] != FF:
+                            heard.add('лесенка' if lad else live.get(w[c], 0))
                 live = {s: m.e.slot[s][0] for s in range(3) if m.e.slot[s][0]}
         elif t in ('SFX', 'SFXI'):
             a = [int(x) for x in p[1:]]
@@ -308,16 +377,23 @@ def main():
             else:
                 nsfxi += 1
         elif t == 'LAD':
+            if m.lad:
+                bad += 1
+                print('  кадр %s: лесенка до конца прошлой — сливов в ней %d из 8' % (p[1], 8 - m.lad))
             m.ladder()
             nlad += 1
     if pend_f is not None:
         check_frame(pend_f)
     heard.discard(0)
-    print('журнал: кадров сверено %d (со звуком по модели %d), сливов %d (со звуком %d), '
+    heard = set(map(str, heard))
+    print('журнал: кадров сверено %d (со звуком по модели %d; на конец кадра слив открыт — %d), сливов %d (со звуком %d, из лесенки %d), '
           'запусков эффектов %d + стендом %d, лесенок %d'
-          % (nfr, nfr_snd, nfl, nfl_snd, nsfx, nsfxi, nlad))
+          % (nfr, nfr_snd, nfr_open, nfl, nfl_snd, nfl_lad, nsfx, nsfxi, nlad))
+    if m.lad or pend_sil:
+        bad += 1
+        print('  журнал оборван посреди лесенки/слива (лесенка: осталось ступеней %d)' % m.lad)
     print('эффекты: запущены id %s; слышны на сливе id %s'
-          % (','.join(map(str, sorted(ids))) or '-', ','.join(map(str, sorted(heard))) or '-'))
+          % (','.join(map(str, sorted(ids))) or '-', ','.join(sorted(heard)) or '-'))
     print('тики: итераций с занятым движком целиком %d, из них не по %d тиков: %d' % (tk_full, TICKS, tk_bad))
     if nfr == 0 or nfl == 0:
         print('ГЕЙТ ПУСТ: нет ни сверенных кадров, ни сливов')

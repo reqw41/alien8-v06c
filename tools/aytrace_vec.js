@@ -9,6 +9,9 @@
 // Переменные окружения:
 //   A8ROOM=<n>   подменить комнату при входе (как в остальных гейтах)
 //   A8MENU=1     НЕ пропускать меню (нужно для мелодии меню и «блипа»); N = кадров
+//   A8LADDER=<n> на входе в msx_frame_off итерации n (от входа в комнату) PC ставится на loc_AFF8 —
+//                путь «вентиль на гнезде криокамеры» (перекраска loc_B005 + 16 лесенок), как в
+//                tools/recolourcheck_vec.js; сценарии стенда этот путь не достают
 //   A8SFX=id:слот:тиков:hi:lo   принудительно запустить эффект на итерации A8SFXIT (по умолчанию 10):
 //                записывается тот же дескриптор слота, что кладёт msx_sfx_start. Нужно для
 //                эффектов 1, 2, 9: сценарий ходьбы до них не доходит, а проверить их надо.
@@ -22,6 +25,11 @@
 //                                     делитель грузится LSB, затем MSB
 //   P <кадр> <счётчик> <упр> <загр> — за кадр: управляющих слов и загрузок делителя (только ненулевые)
 //   FL <кадр>                       — вход в msx_frame_off (слив зеркала; во время мелодии — пустой)
+//   VF <кадр>                       — вход в msx_viflush (сам слив: из msx_frame_off и из лесенки)
+//   VE <кадр> <д1> <д2> <у1> <з1> <у2> <з2> — выход из того же слива: делители счётчиков 1,2 и
+//                                     управляющих слов / загрузок за слив. Слив может перейти
+//                                     границу кадра, поэтому исход слива сверяется по VE, а V/P —
+//                                     только в кадрах, на конец которых слив не открыт
 //   TUNE <кадр> <номер мелодии>     — начало мелодии (msx_play 0 -> 1), номер из msx_tunenum
 //   TEND <кадр>                     — конец мелодии (msx_play 1 -> 0)
 //   SFX <кадр> <слот> <id> <тиков> <hi> <lo> <stepc> <x> <y> — запуск эффекта (заполнен дескриптор)
@@ -45,7 +53,7 @@ for (const l of fs.readFileSync(SLD, "latin1").split("\n")) {
   if (p.length >= 8 && p[6] === "L") { const n = p[7].split(",")[1]; if (n && !(n in L)) L[n] = +p[5]; }
 }
 for (const need of ["msx_play", "msx_sfx", "msx_tunenum", "msx_frame_off", "msx_sfx_tick", "msx_snd_init",
-                    "audio_msx_ladder", "seed_2", "curr_room_attrib"])
+                    "audio_msx_ladder", "msx_viflush", "loc_AFF8", "seed_2", "curr_room_attrib"])
   if (L[need] === undefined) { console.log("нет метки " + need + " — сборка без звука?"); process.exit(2); }
 const SEED2HI = L.seed_2 + 1, ROOM = L.curr_room_attrib, VKBD = L.vkbd;
 const lst = fs.readFileSync(ROM.replace(/\.r0m$/, ".lst"), "latin1").split("\n");
@@ -104,16 +112,18 @@ if (INPUTS && fs.existsSync(INPUTS)) for (const l of fs.readFileSync(INPUTS, "ut
 // автомат LSB/MSB; nctl/nld — управляющих слов и загрузок делителя за текущий кадр.
 let frame = 0, nv = 0;
 const eff = [0, 0, 0], rx = [0, 0, 0], pend = [0, 0, 0], nctl = [0, 0, 0], nld = [0, 0, 0];
+const tctl = [0, 0, 0], tld = [0, 0, 0];      // накопительно — для VE
+let vfRet = -1, vfSP = -1, vfC = null;
 const oout = io.output.bind(io);
 io.output = function (port, w) {
   const p = port & 0xFF, v = w & 0xFF;
   if (p === 0x08) {
     const c = v >> 6;
-    if (c < 3 && (v & 0x30) !== 0) { eff[c] = 0; rx[c] = 0; pend[c] = 0; nctl[c]++; }  // без делителя = стоп
+    if (c < 3 && (v & 0x30) !== 0) { eff[c] = 0; rx[c] = 0; pend[c] = 0; nctl[c]++; tctl[c]++; }  // без делителя = стоп
   } else if (p >= 0x09 && p <= 0x0B) {
     const c = 0x0B - p;
     if (rx[c] === 0) { pend[c] = v; rx[c] = 1; }
-    else { eff[c] = ((v << 8) | pend[c]) & 0xFFFF; rx[c] = 0; nld[c]++; }
+    else { eff[c] = ((v << 8) | pend[c]) & 0xFFFF; rx[c] = 0; nld[c]++; tld[c]++; }
   }
   return oout(port, w);
 };
@@ -128,7 +138,7 @@ function endFrame() {             // итог кадра `frame` (вызыват
 
 // ---------------- события драйвера ----------------
 const T = L.graphic_objs_tbl, SFX = L.msx_sfx, PLAY = L.msx_play, FOFF = L.msx_frame_off,
-      TICK = L.msx_sfx_tick, SINIT = L.msx_snd_init, LADDER = L.audio_msx_ladder;
+      TICK = L.msx_sfx_tick, VFL = L.msx_viflush, SINIT = L.msx_snd_init, LADDER = L.audio_msx_ladder;
 let phase = process.env.A8MENU ? "menuplay" : "menu", iter = 0, startIter = 0, startseq = null;
 // A8SFX: hi:lo можно задать именем списка эффекта 9 — "e9a" / "e9b" (адрес берётся из .sld)
 const FSFX = process.env.A8SFX ? (function (p) {
@@ -137,6 +147,7 @@ const FSFX = process.env.A8SFX ? (function (p) {
   return p.map(Number);
 })(process.env.A8SFX.split(":")) : null;
 const FSFXIT = +(process.env.A8SFXIT || 10);
+const LADIT = +(process.env.A8LADDER || 0); let ladDone = false;
 memory.write = function (a, w, s) {
   a &= 0xffff;
   if (phase === "menu" && cpu.pc === SYNC) {
@@ -212,7 +223,22 @@ while (steps < 6e8) {
   if (frc >= 59904) { frc -= 59904; endFrame(); frame++; if (!cpu.iff) lost++;
     if (!(IRQDROP && !cpu.iff)) { v06c.irq = true; v06c.checkInterrupt(); } }
   const pc = cpu.pc;
-  if (pc === FOFF) console.log("FL " + frame);
+  if (pc === FOFF) {
+    if (LADIT && !ladDone && iter - startIter === LADIT) {       // A8LADDER: путь криокамеры
+      ladDone = true; console.log("# A8LADDER: msx_frame_off -> loc_AFF8, кадр " + frame);
+      cpu.pc = L.loc_AFF8;
+    } else console.log("FL " + frame);
+  }
+  else if (pc === VFL && vfRet < 0) {
+    console.log("VF " + frame);
+    vfSP = cpu.sp; vfRet = memory.read(vfSP, false) | (memory.read(vfSP + 1, false) << 8);
+    vfC = [tctl[1], tld[1], tctl[2], tld[2]];
+  }
+  else if (pc === vfRet && cpu.sp === vfSP + 2) {
+    console.log("VE " + frame + " " + eff[1] + " " + eff[2] + " " + (tctl[1] - vfC[0]) + " " + (tld[1] - vfC[1]) +
+                " " + (tctl[2] - vfC[2]) + " " + (tld[2] - vfC[3]));
+    vfRet = -1;
+  }
   else if (pc === TICK) console.log("TK " + frame);
   else if (pc === SINIT) console.log("INIT " + frame);
   else if (pc === LADDER) console.log("LAD " + frame);
