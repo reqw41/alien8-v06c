@@ -243,6 +243,7 @@ msx_play_tune:	; HL = указатель на байт каталога (msx_cat
 				ld		e, a					; база + смещение, младший байт
 				ld		a, d
 				adc		a, b					; старший, с переносом (ld флаги не портят)
+				ld		d,a					; старший байт АБСОЛЮТНОГО адреса = результат adc (в D лежало смещение)
 				ld		hl, msx_tv_v0
 				ld		(hl), e
 				inc		hl
@@ -275,6 +276,7 @@ msx_play_tune:	; HL = указатель на байт каталога (msx_cat
 				ld		e, a
 				ld		a, d
 				adc		a, b
+				ld		d,a					; тот же старший байт для голоса B
 				ld		hl, msx_tv_v0 + 16
 				ld		(hl), e
 				inc		hl
@@ -303,11 +305,15 @@ msx_stop_tune:	xor		a
 
 ; тик — ровно один за кадр (зовёт msx_frame). Портит AF,BC,DE,HL.
 msx_tv_tick:			ld		hl, msx_tv_rem
-				dec		(hl)
-				jp		nz, mtt_a
+				ld		a, (hl)					; младший rem: заём НУЖЕН, но только когда lo==0
+				or		a
+				jp		nz, mtt_lo			; lo>0: займа нет (в т.ч. lo=1 -> 0)
+				dec		(hl)					; lo 0 -> FF
 				inc		hl
-				dec		(hl)					; заём из младшего (rem > 0 до тика)
+				dec		(hl)					; заём у hi (rem > 0 до тика, значит hi > 0)
 				dec		hl
+				jp		mtt_a
+mtt_lo:			dec		(hl)					; lo 1 -> 0 — старший НЕ трогаем
 mtt_a:			ld		a, (msx_tv_rem)
 				ld		b, a
 				ld		a, (msx_tv_rem + 1)
