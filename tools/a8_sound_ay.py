@@ -22,9 +22,11 @@
 """
 import os
 import re
+import struct
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TUNES = os.path.join(HERE, '..', 'src', 'msx_tunes.bin')
+VI53 = os.path.join(HERE, '..', 'src', 'msx_tunes_vi53.bin')
 
 # карта src/msx_tunes.bin (msx_psg_model.py export)
 O_PERIODS = 0x0000   # 128 байт: периоды нот 0..63 (0..7 — слова таблицы команд MSX,
@@ -65,22 +67,16 @@ def data_block():
     with open(TUNES, 'rb') as f:
         d = f.read()
     assert len(d) == SIZE, 'msx_tunes.bin: ожидалось %d байт, получено %d' % (SIZE, len(d))
+    per = [d[O_PERIODS + 2 * i] | (d[O_PERIODS + 2 * i + 1] << 8) for i in range(64)]
+    stp = d[O_STEPS:O_STEPS + 16]
     txt = '\n; ---- данные звука (извлечены из картриджа MSX, src/msx_tunes.bin) ----\n'
-    txt += _db('msx_per', d[O_PERIODS:O_PERIODS + 128],
-               'период по номеру ноты 0..63 (0..7 — слова таблицы команд MSX: их пишет заглушка с громкостью 0)')
-    txt += _db('msx_steptb', d[O_STEPS:O_STEPS + 16], 'ноты эффекта «шаги», индекс = msx_stepc AND 0x0F')
-    txt += _db('msx_init', d[O_INIT:O_INIT + 13], 'список PSG перед мелодией')
+    # real-time проигрыватель мелодий MSX снят (мелодии — готовые потоки ВИ53, см. ниже);
+    # от данных мелодий (msx_per/msx_steptb/msx_init/msx_env/msx_headers/msx_stream)
+    # осталась только двойная выборка эффекта 3 — одна слитая таблица периодов «шагов»
+    txt += _db('msx_step_per', b''.join(struct.pack('<H', per[stp[i]]) for i in range(16)),
+               'эффект «шаги»: период = msx_per[msx_steptb[i]], индекс = msx_stepc AND 0x0F')
     txt += _db('msx_stop', d[O_STOP:O_STOP + 9], 'список PSG «полная тишина»')
-    txt += _db('msx_env', d[O_ENV:O_ENV + 3], 'R13 := 0 (форма огибающей)')
     txt += _db('msx_kmask', [0x09, 0x12, 0x24], 'биты тона+шума слота 0/1/2 в тени R7')
-    for i, nm in enumerate(TUNE_NAMES):
-        w = d[O_HEADERS + 6 * i: O_HEADERS + 6 * i + 6]
-        offs = [(w[2 * k] | (w[2 * k + 1] << 8)) for k in range(3)]
-        for o in offs:
-            assert 0 <= o < 445, 'заголовок %s: смещение %d вне пула потоков' % (nm, o)
-        txt += 'msx_hdr_%s:\tDW\t%s\t; каналы C, B, A\n' % (
-            nm, ', '.join('msx_stream+%d' % o for o in offs))
-    txt += _db('msx_stream', d[O_STREAMS:O_STREAMS + 445], 'потоки нот всех шести мелодий (адреса MSX 0x4784..0x4940)')
     txt += """msx_e9a:		DB	0x10, 0x18, 0x20, 0x28, 0xFF	; список периодов эффекта 9 (MSX 0x456F)
 				DW	msx_e9a
 msx_e9b:		DB	0x60, 0x44, 0x30, 0x38, 0xFF	; вариант B (MSX 0x457A)
@@ -90,14 +86,18 @@ msx_e9b:		DB	0x60, 0x44, 0x30, 0x38, 0xFF	; вариант B (MSX 0x457A)
 msx_mix:		DS		1			; тень регистра 7 (микшер), как 0xD810 на MSX
 msx_stepc:		DS		1			; счётчик шагов (индекс в msx_steptb), как 0xD811
 msx_si:			DS		1			; текущий слот эффекта 0..2
-msx_ci:			DS		1			; текущий канал мелодии 0..2 (0 -> AY C, 1 -> B, 2 -> A)
-msx_rem:		DS		1			; сколько «проходов» MSX осталось отмотать в этом кадре
 msx_play:		DS		1			; 1 = мелодия играет
-msx_end:		DS		1			; 1 = в потоке встретилась команда END
 msx_busy:		DS		1			; 1 = хотя бы один слот эффекта занят (быстрый пропуск тика)
 msx_sfx:		DS		12			; 3 слота по 4 байта: id, тиков, параметр_hi, параметр_lo
-msx_ch:			DS		21			; 3 канала по 7: ptr(2), dur(2), режим громкости(1), начало потока(2)
 """
+    txt += '\n; ---- мелодии: готовые потоки ВИ53 (src/msx_tunes_vi53.bin, tools/a8_tunes_msx.py) ----\n'
+    with open(VI53, 'rb') as f:
+        v = f.read()
+    assert len(v) == 847, 'msx_tunes_vi53.bin: ожидалось 847 байт (сначала tools/a8_tunes_msx.py)'
+    txt += _db('msx_cat', v, 'каталог + 6 блобов в формате a8_tune_c64 (голос C всегда пуст)')
+    txt += _db('msx_catidx', bytes(range(6)), 'байт для DE: адрес msx_hdr_* передаётся в play_audio')
+    for i, nm in enumerate(TUNE_NAMES):
+        txt += 'msx_hdr_%s:\t\t\tEQU\tmsx_catidx+%d\n' % (nm, i)
     return txt
 
 
@@ -139,13 +139,16 @@ msx_wlist:		; HL = список пар (регистр, значение), те�
 				jp		msx_wlist
 
 msx_snd_init:	; из vec_boot: слоты пусты, мелодии нет, звук молчит
+				ld		a, 0xD3					; заготовка «out (порт), a» — порт правит msx_tv_out
+				ld		(msx_tv_stub), a
+				ld		a, 0xC9					; ret на +2: у i8080 нет out (c)
+				ld		(msx_tv_stub + 2), a
 				xor		a
 				ld		(msx_play), a
-				ld		(msx_end), a
 				ld		(msx_stepc), a
 				ld		(msx_busy), a
 				ld		hl, msx_sfx
-				ld		b, 12 + 21			; слоты эффектов и каналы мелодии
+				ld		b, 12					; слоты эффектов
 msi_l:			ld		(hl), 0
 				inc		hl
 				dec		b
@@ -156,242 +159,374 @@ msx_silence:	ld		hl, msx_stop
 				jp		msx_wlist
 
 ; ---------------------------------------------------------------- мелодии
-msx_play_tune:	; HL = заголовок мелодии (3 слова). Как MSX 0x45BB: прогнать список инициализации
-				; PSG и зарядить три канала. Режим громкости (+4) НЕ обнуляется — дефект
-				; оригинала воспроизведён дословно (все шесть потоков начинаются командой режима).
-				xor		a
-				ld		(msx_end), a
-				ld		(msx_play), a
-				push	hl
-				ld		hl, msx_init
-				call	msx_wlist
-				pop		hl
-				ld		de, msx_ch
-				ld		b, 3
-mpt_l:			ld		c, (hl)
-				inc		hl
+; Мелодии играются из src/msx_tunes_vi53.bin (tools/a8_tunes_msx.py): каталог
+; (+0 u16 N=6; далее 6 записей: u16 смещение блоба, u16 длина в кадрах) и блобы в
+; формате a8_tune_c64 (Re-Pair; голос C всегда пуст). Real-time пересчёт MSX снят:
+; тот же плеер a8_tv, что у заставки (tools/a8_vec.py, fc3c9d9), но два голоса и
+; конечная длина: голос A -> счётчик 1 (порт 0x0A), голос B -> счётчик 2 (порт 0x09);
+; счётчик 0 — секундомер бюджета di, вектор 0x0038 не подменяем (голос C пуст).
+; Играем РОВНО «длину в кадрах» тиков, потом глушим счётчики 1,2 (управляющее слово
+; БЕЗ делителя). Запись голоса (шаг 16): +0/+1 pc, +2/+3 start, +4 res, +5 snd,
+; +6 depth, +7..+14 стек возвратов (depth <= 4 по построению данных, проверка —
+; в tools/a8_tunes_msx.py). Приёмы с заставки: управляющее слово ПЕРЕЗАПУСКАЕТ
+; счётчик, поэтому шлём его на смене ноты и на переходе звук->тишина не шлём
+; вовсе; тишина = управляющее слово БЕЗ делителя; при возврате из правила кэш snd
+; бить в 0xFF, иначе повтор той же ноты после паузы промолчит.
+
+msx_play_tune:	; HL = указатель на байт каталога (msx_catidx): зарядить голоса из блоба
 				ld		a, (hl)
-				inc		hl
-				push	hl
-				ld		h, a
-				ld		l, c				; HL = начало потока канала
-				ld		a, l
-				ld		(de), a				; +0 ptr_lo
-				inc		de
-				ld		a, h
-				ld		(de), a				; +1 ptr_hi
-				inc		de
-				xor		a
-				ld		(de), a				; +2 dur_lo = 0 -> первый же проход делает выборку
-				inc		de
-				ld		(de), a				; +3 dur_hi
-				inc		de
-				inc		de					; +4 режим громкости — как на MSX, не трогаем
-				ld		a, l
-				ld		(de), a				; +5 начало потока (для команды LOOP)
-				inc		de
-				ld		a, h
-				ld		(de), a				; +6
-				inc		de
-				pop		hl
-				dec		b
-				jp		nz, mpt_l
-				ld		a, 1
-				ld		(msx_play), a
-				ret
-
-msx_stop_tune:	xor		a
-				ld		(msx_play), a
-				ld		(msx_end), a
-				jp		msx_silence
-
-msx_frame:		; один видеокадр мелодии: ждём обратного хода и отматываем проходы
-%(wait)s
-msx_mtick:		ld		a, (msx_play)
-				or		a
-				ret		z
-				xor		a
-				ld		(msx_ci), a
-				ld		hl, msx_ch
-				ld		b, 3
-mt_ch:			push	bc
-				push	hl
-				call	msx_chan
-				pop		hl
-				pop		bc
-				ld		a, (msx_end)
-				or		a
-				jp		nz, mt_done			; END: остальные каналы в этом проходе не обслуживаются
-				ld		de, 7
-				add		hl, de
-				ld		a, (msx_ci)
-				inc		a
-				ld		(msx_ci), a
-				dec		b
-				jp		nz, mt_ch
-				ret
-mt_done:		xor		a					; список остановки уже записал обработчик END
-				ld		(msx_play), a
-				ld		(msx_end), a
-				ret
-
-msx_chan:		; HL -> структура канала, (msx_ci) = индекс. Отмотать %(passes)d проходов MSX.
-				ld		a, %(passes)d
-				ld		(msx_rem), a
-mc_loop:		ld		d, h
-				ld		e, l
-				inc		de
-				inc		de					; DE -> dur_lo
-				ld		a, (de)
-				ld		b, a				; B = dur_lo
-				inc		de
-				ld		a, (de)				; A = dur_hi
-				dec		de
-				ld		c, a				; C = dur_hi
-				or		b
-				jp		z, mc_fetch
-				ld		a, c
-				or		a
-				jp		nz, mc_big			; длительность >= 256 > остатка проходов
-				ld		a, (msx_rem)
-				cp		b
-				jp		c, mc_part			; остаток меньше длительности
-				sub		b					; остаток >= длительности: dur -> 0, проходы тратим
-				ld		(msx_rem), a
-				xor		a
-				ld		(de), a				; dur_lo = 0 (dur_hi уже 0)
-				ld		a, (msx_rem)
-				or		a
-				ret		z
-				jp		mc_loop
-mc_part:		ld		c, b				; C = dur_lo
-				ld		a, (msx_rem)
-				ld		b, a
-				ld		a, c
-				sub		b
-				ld		(de), a				; dur_lo -= остаток
-				xor		a
-				ld		(msx_rem), a
-				ret
-mc_big:			ld		a, (msx_rem)
-				ld		b, a
-				ld		a, (de)
-				sub		b
-				ld		(de), a
-				jp		nc, mc_big2
-				inc		de
-				ld		a, (de)
-				dec		a
-				ld		(de), a
-mc_big2:		xor		a
-				ld		(msx_rem), a
-				ret
-mc_fetch:		push	hl
-				call	msx_fetch
-				pop		hl
-				ld		a, (msx_end)
-				or		a
-				ret		nz
-				ld		a, (msx_rem)		; выборка тоже занимает один проход
-				dec		a
-				ld		(msx_rem), a
-				ret		z
-				jp		mc_loop
-
-msx_fetch:		; HL -> структура канала: читать события, пока не установится длительность
-mf_loop:		ld		e, (hl)
-				inc		hl
-				ld		d, (hl)
-				dec		hl					; DE = указатель потока
-				ld		a, (de)
-				inc		de
-				ld		(hl), e
-				inc		hl
-				ld		(hl), d
-				dec		hl					; указатель сдвинут
-				cp		8
-				jp		nc, mf_note
-				or		a
-				jp		z, mf_mode
-				cp		4
-				jp		z, mf_rest
-				cp		6
-				jp		z, mf_loopc
-				cp		7
-				jp		z, mf_end
-mf_mode:		; команды 0,1,2,3,5 — только меняют режим громкости, время не тратят
-				push	hl
-				ld		de, 4
-				add		hl, de
-				ld		(hl), a
-				pop		hl
-				jp		mf_loop
-mf_loopc:		; команда 6: вернуться на начало потока
-				push	hl
-				ld		de, 5
-				add		hl, de
-				ld		e, (hl)
-				inc		hl
-				ld		d, (hl)
-				pop		hl
-				ld		(hl), e
-				inc		hl
-				ld		(hl), d
-				dec		hl
-				jp		mf_loop
-mf_end:			; команда 7: полная тишина и выход из проигрывателя (MSX 0x473C)
-				ld		a, 1
-				ld		(msx_end), a
-				jp		msx_silence
-mf_rest:		; команда 4 (MSX 0x4723): режим 4, громкость по режиму, затем явный ноль,
-				; пауза 1024 прохода
-				push	hl
-				inc		hl
-				inc		hl
-				ld		(hl), 0				; dur_lo
-				inc		hl
-				ld		(hl), 4				; dur_hi -> 0x0400 = 1024 прохода
-				inc		hl
-				ld		(hl), 4				; режим := 4
-				pop		hl
-				push	hl
-				call	msx_volmode
-				pop		hl
-				xor		a
-				jp		msx_setvolm			; поверх режима — явный ноль
-mf_note:		; A = байт ноты: биты 0-5 номер, 6-7 множитель длительности
-				ld		b, a
-				push	hl					; указатель структуры канала
-				rlca
-				rlca
-				and		3
-				inc		a
-				rlca
-				rlca						; (множитель+1)*4 = старший байт длительности (1024..4096)
-				inc		hl
-				inc		hl
-				ld		(hl), 0				; dur_lo
-				inc		hl
-				ld		(hl), a				; dur_hi
-				ld		a, b
-				and		0x3F
+				ld		(msx_tunenum), a		; номер мелодии — для TUNE-строки журнала
 				ld		l, a
 				ld		h, 0
 				add		hl, hl
-				ld		de, msx_per
-				add		hl, de
+				add		hl, hl					; 4*idx: запись +0/+1 смещение блоба, +2/+3 длина
+				ld		de, msx_cat + 2
+				add		hl, de					; idx < 6, переноса из младшего байта нет
+				ld		c, (hl)					; BC = смещение блоба
+				inc		hl
+				ld		b, (hl)
+				inc		hl
+				ld		a, (hl)					; длина в кадрах, младший байт
+				inc		hl
+				ld		h, (hl)					; старший
+				ld		l, a
+				ld		a, l
+				ld		(msx_tv_rem), a			; i8080: 16-битных ld (nnnn),hl нет — по байтам
+				ld		a, h
+				ld		(msx_tv_rem + 1), a
+				ld		hl, msx_cat
+				add		hl, bc					; база блоба; нижний регион — переноса нет
+				ld		a, l
+				ld		(msx_tv_base), a
+				ld		a, h
+				ld		(msx_tv_base + 1), a
+				; divs = база + 10 + 2nr (nr = слово по +6); база — ЗНАЧЕНИЕ в ячейке,
+				; поэтому сначала грузим её в HL, потом прибавляем 6 (как a8_tune_init у заставки,
+				; где база была константой a8_tune)
+				ld		a, (msx_tv_base)
+				ld		l, a
+				ld		a, (msx_tv_base + 1)
+				ld		h, a
+				ld		de, 6
+				add		hl, de					; -> &числа правил nr
+				ld		c, (hl)
+				inc		hl
+				ld		b, (hl)					; BC = число правил nr
+				ld		a, (msx_tv_base)
+				ld		l, a
+				ld		a, (msx_tv_base + 1)
+				ld		h, a					; HL = база блоба
+				add		hl, bc
+				add		hl, bc					; база + 2nr
+				ld		de, 10
+				add		hl, de					; -> таблица делителей
+				ld		a, l
+				ld		(msx_tv_divs), a
+				ld		a, h
+				ld		(msx_tv_divs + 1), a
+				; голоса: pc = start = база + слово(база + 2*голос); res/snd/depth = 0
+				ld		a, (msx_tv_base)
+				ld		c, a
+				ld		a, (msx_tv_base + 1)
+				ld		b, a					; BC = база (и для чтения, и для сложения)
+				ld		a, (bc)					; начало голоса A (смещение от базы)
+				ld		e, a
+				inc		bc
+				ld		a, (bc)
+				ld		d, a					; DE = смещение
+				ld		a, (msx_tv_base)
+				ld		c, a
+				ld		a, (msx_tv_base + 1)
+				ld		b, a					; BC = база (перечитать: bc был сдвинут)
+				ld		a, e
+				add		a, c
+				ld		e, a					; база + смещение, младший байт
+				ld		a, d
+				adc		a, b					; старший, с переносом (ld флаги не портят)
+				ld		hl, msx_tv_v0
+				ld		(hl), e
+				inc		hl
+				ld		(hl), d					; pc
+				inc		hl
+				ld		(hl), e
+				inc		hl
+				ld		(hl), d					; start — чтобы 0xFF верхнем уровне начал голос сначала
+				xor		a
+				ld		(msx_tv_v0 + 4), a		; res = 0: первый тик берёт токен
+				ld		(msx_tv_v0 + 5), a		; snd = 0: счётчик 1 молчит
+				ld		(msx_tv_v0 + 6), a		; depth = 0
+				ld		a, (msx_tv_base)
+				ld		c, a
+				ld		a, (msx_tv_base + 1)
+				ld		b, a
+				inc		bc
+				inc		bc						; BC = база + 2 (адрес чтения голоса B)
+				ld		a, (bc)
+				ld		e, a
+				inc		bc
+				ld		a, (bc)
+				ld		d, a					; DE = смещение голоса B
+				ld		a, (msx_tv_base)
+				ld		c, a
+				ld		a, (msx_tv_base + 1)
+				ld		b, a					; BC = база (для сложения)
+				ld		a, e
+				add		a, c
+				ld		e, a
+				ld		a, d
+				adc		a, b
+				ld		hl, msx_tv_v0 + 16
+				ld		(hl), e
+				inc		hl
+				ld		(hl), d
+				inc		hl
+				ld		(hl), e
+				inc		hl
+				ld		(hl), d
+				xor		a
+				ld		(msx_tv_v0 + 16 + 4), a
+				ld		(msx_tv_v0 + 16 + 5), a
+				ld		(msx_tv_v0 + 16 + 6), a
+				ld		a, 0x76					; заглушить счётчики 1,2: с эффектов мог остаться тон
+				out		(0x08), a
+				ld		a, 0xB6
+				out		(0x08), a
+				ld		a, 1
+				ld		(msx_play), a			; мелодия играет: msx_sfx_start отказывает (как на MSX);
+				ret								;   на эту запись вешается TUNE-метка журнала
+
+msx_stop_tune:	xor		a
+				ld		(msx_play), a
+				ld		(msx_tv_rem), a
+				ld		(msx_tv_rem + 1), a
+				jp		msx_tv_mute
+
+; тик — ровно один за кадр (зовёт msx_frame). Портит AF,BC,DE,HL.
+msx_tv_tick:			ld		hl, msx_tv_rem
+				dec		(hl)
+				jp		nz, mtt_a
+				inc		hl
+				dec		(hl)					; заём из младшего (rem > 0 до тика)
+				dec		hl
+mtt_a:			ld		a, (msx_tv_rem)
+				ld		b, a
+				ld		a, (msx_tv_rem + 1)
+				or		b
+				push	af						; Z = этот тик последний (длина в кадрах кончилась)
+				ld		a, 1
+				ld		(msx_tv_c), a			; голос A -> счётчик 1 (порт 0x0A)
+				ld		hl, msx_tv_v0
+				call	msx_tv
+				ld		a, 2
+				ld		(msx_tv_c), a			; голос B -> счётчик 2 (порт 0x09)
+				ld		hl, msx_tv_v0 + 16
+				call	msx_tv
+				pop		af
+				ret		nz
+				xor		a
+				ld		(msx_play), a			; «длина в кадрах» сыграна
+				jp		msx_tv_mute			; заглушить счётчики 1,2
+
+msx_tv_mute:			ld		a, 0x76					; управляющее слово БЕЗ делителя: счётчик 1 встал
+				out		(0x08), a
+				ld		a, 0xB6					; ...и счётчик 2
+				out		(0x08), a
+				ret
+
+; голос: HL = запись состояния, (msx_tv_c) = номер счётчика 1/2. Портит AF,DE,HL.
+msx_tv:					ld		(msx_tv_stp), hl
+				ld		a, l
+				add		a, 4
+				ld		l, a
+				ld		a, (hl)					; res
+				or		a
+				jp		nz, msx_tv_dec
+msx_tv_tok:			ld		hl, (msx_tv_stp)
 				ld		e, (hl)
 				inc		hl
-				ld		d, (hl)				; DE = период
-				ld		a, (msx_ci)
+				ld		d, (hl)					; DE = pc
+				ld		a, (de)					; токен
+				cp		0xFF
+				jp		z, msx_tv_ret
+				or		a
+				jp		p, msx_tv_note		; 0x00..0x7E нота; 0x80..0xFE вызов правила (всегда два байта)
+				ld		b, a
+				inc		de
+				ld		a, (de)					; k = ((b and 0x7F) << 8) | следующий байт
+				ld		l, a
+				ld		a, b
+				and		0x7F
+				ld		h, a
+				inc		de						; DE = адрес возврата pc+2
+				push	hl
+				ld		hl, (msx_tv_stp)
+				ld		a, l
+				add		a, 6
+				ld		l, a						; &depth
+				inc		(hl)						; глубина <= 4 по построению данных
+				ld		a, (hl)
 				add		a, a
+				ld		b, a
+				ld		a, l
+				add		a, b
+				sub		1						; &слота возврата = база+5+2depth (hl уже = база+6)
+				ld		l, a
+				ld		(hl), e
+				inc		hl
+				ld		(hl), d
+				pop		hl						; HL = k
+				add		hl, hl					; 2k
+				ld		de, 8
+				add		hl, de					; -> слово(база + 8 + 2k): адрес правила
+				ld		a, (msx_tv_base)
 				ld		c, a
-				ld		a, 4
+				ld		a, (msx_tv_base + 1)
+				ld		b, a						; BC = база блоба
+				add		hl, bc
+				ld		e, (hl)
+				inc		hl
+				ld		d, (hl)					; DE = смещение правила
+				ld		l, e
+				ld		h, d
+				ld		a, (msx_tv_base)
+				ld		c, a
+				ld		a, (msx_tv_base + 1)
+				ld		b, a						; BC = база блоба
+				add		hl, bc					; HL = адрес правила
+				ex		de, hl					; DE = адрес правила (i8080 EX DE,HL)
+				ld		hl, (msx_tv_stp)
+				ld		(hl), e
+				inc		hl
+				ld		(hl), d					; pc = правило, кадр не потрачен — за токеном снова
+				jp		msx_tv_tok
+msx_tv_dec:			dec		a
+				ld		(hl), a					; res--
+				ret
+msx_tv_ret:			ld		hl, (msx_tv_stp)
+				ld		a, l
+				add		a, 6
+				ld		l, a						; &depth
+				ld		a, (hl)
+				or		a
+				jp		z, msx_tv_top
+				add		a, a						; +5+2depth = &слота последнего возврата
+				ld		b, a
+				ld		a, (hl)
+				dec		a
+				ld		(hl), a					; depth--
+				ld		a, l
+				add		a, b
+				sub		1						; &слота возврата = база+5+2depth
+				ld		l, a
+				ld		e, (hl)
+				inc		hl
+				ld		d, (hl)					; DE = адрес возврата
+				ld		hl, (msx_tv_stp)
+				ld		(hl), e
+				inc		hl
+				ld		(hl), d					; pc = адрес возврата
+				ld		a, l
+				add		a, 4
+				ld		l, a						; &snd
+				ld		(hl), 0xFF			; при возврате бить кэш: нота после паузы обязана
+												; получить своё управляющее слово
+				jp		msx_tv_tok
+msx_tv_top:			ld		a, l				; верхний уровень: 0xFF = начать голос сначала
+				sub		1
+				ld		l, a						; &snd
+				ld		(hl), 0xFF				; кэш тоже выбит
+				ld		a, l
+				sub		3
+				ld		l, a						; &start (младший байт)
+				ld		e, (hl)
+				inc		hl
+				ld		d, (hl)
+				ld		a, l
+				sub		3
+				ld		l, a						; &pc
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				jp		msx_tv_tok
+msx_tv_note:			ld		b, a				; A = индекс делителя (0x00..0x7E), DE = pc
+				inc		de
+				ld		a, (de)					; длина в кадрах 1..255
+				ld		(msx_tv_len), a
+				ld		a, b
+				ld		l, a
+				ld		h, 0
+				add		hl, hl
+				ld		a, (msx_tv_divs)		; i8080: 16-битная загрузка из памяти — по байтам
+				ld		c, a
+				ld		a, (msx_tv_divs + 1)
+				ld		b, a
+				add		hl, bc					; &делителя
+				ld		a, (hl)
+				ld		(msx_tv_div), a		; делитель lo -> в ячейку
+				inc		hl
+				ld		a, (hl)
+				ld		(msx_tv_div + 1), a	; делитель hi
+				ld		hl, (msx_tv_stp)		; pc += 2: загрузка байта из памяти сбрасывает перенос,
+				ld		a, (hl)
+				add		a, 2
+				ld		e, a						; E = lo+2
+				inc		hl
+				ld		a, (hl)					; hi
+				ld		c, a
+				ld		a, e
+				sub		2						; заём = (lo+2 < 2) = тот самый перенос
+				ld		a, c
+				adc		a, 0					; hi + перенос
+				ld		(hl), a
+				dec		hl
+				ld		a, e
+				ld		(hl), a					; pc += 2 готов
+				inc		hl
+				ld		a, l
+				add		a, 3
+				ld		l, a						; &res
+				ld		a, (msx_tv_len)
+				sub		1						; кадр взятия ноты уже потрачен (как в decode): res = длина-1
+				ld		(hl), a					; res
+				inc		hl						; &snd
+				ld		a, (msx_tv_div)
+				ld		e, a
+				ld		a, (msx_tv_div + 1)
+				ld		d, a
+				or		e						; делитель == 0 -> тишина
+				jp		nz, msx_tv_on
+				ld		a, (hl)
+				or		a
+				jp		z, msx_tv_rtn			; и так молчит — порты не трогать
+				ld		(hl), 0
+				jp		msx_tv_ctrlw			; тишина = управляющее слово БЕЗ делителя (счётчик встаёт)
+msx_tv_on:			ld		(hl), 1
+				call	msx_tv_ctrlw			; смена ноты: управляющее слово ПЕРЕЗАПУСКАЕТ счётчик
+				ld		a, e
+				call	msx_tv_out			; делитель: сначала младший байт
+				ld		a, d
+				jp		msx_tv_out
+msx_tv_rtn:			ret
+msx_tv_ctrlw:			ld		a, (msx_tv_c)	; управляющее слово счётчика: режим 3 меандр, LSB+MSB
+				rrca
+				rrca							; 1 -> 0x40, 2 -> 0x80
+				and		0xC0
+				add		a, 0x36				; 0x76 / 0xB6
+				out		(0x08), a
+				ret
+msx_tv_out:			ld		b, a				; байт делителя в порт счётчика (порт = 0x0B - C)
+				ld		a, (msx_tv_c)
+				ld		c, a
+				ld		a, 0x0B
 				sub		c
-				ld		c, a				; регистр тона: канал 0 -> R4, 1 -> R2, 2 -> R0
-				call	msx_wper
-				pop		hl
-				jp		msx_volmode
+				ld		(msx_tv_stub + 1), a
+				ld		a, b
+				jp		msx_tv_stub
+
+msx_frame:		; один видеокадр мелодии: ждём обратного хода, затем один тик обоих голосов
+%(wait)s
+				call	msx_tv_tick
+				ret
 
 msx_wper:		; C = младший регистр тона, DE = период
 				ld		b, e
@@ -402,36 +537,6 @@ msx_wper:		; C = младший регистр тона, DE = период
 				pop		de
 				inc		c
 				ld		b, d
-				jp		msx_wr
-
-msx_volmode:	; HL -> структура канала: применить режим громкости (+4). Таблица MSX 0x466F.
-				push	hl
-				ld		de, 4
-				add		hl, de
-				ld		a, (hl)
-				pop		hl
-				or		a
-				jp		z, msx_setvolm		; режим 0 -> громкость 0
-				cp		1
-				jp		z, mvm_7
-				cp		2
-				jp		z, mvm_f
-				cp		5
-				jp		nc, msx_setvolm		; режим 5 в данных не встречается — считаем молчанием
-				ld		a, 0x10				; режимы 3 и 4 — огибающая
-				call	msx_setvolm
-				ld		hl, msx_env
-				jp		msx_wlist
-mvm_7:			ld		a, 7				; у MSX Alien 8 режим 1 = громкость 7 (у Knight Lore 9)
-				jp		msx_setvolm
-mvm_f:			ld		a, 0x0F
-msx_setvolm:	; A = значение -> регистр громкости канала мелодии (0 -> R10, 1 -> R9, 2 -> R8)
-				ld		b, a
-				ld		a, (msx_ci)
-				ld		c, a
-				ld		a, 10
-				sub		c
-				ld		c, a
 				jp		msx_wr
 
 ; ---------------------------------------------------------------- эффекты
@@ -572,13 +677,8 @@ mse3:			; ШАГИ: громкость от координат игрока, н�
 				and		0x0F
 				ld		l, a
 				ld		h, 0
-				ld		de, msx_steptb
-				add		hl, de
-				ld		a, (hl)
-				ld		l, a
-				ld		h, 0
-				add		hl, hl
-				ld		de, msx_per
+				add		hl, hl					; msx_step_per = msx_per[msx_steptb[i]]: таблицы слиты
+				ld		de, msx_step_per
 				add		hl, de
 				ld		e, (hl)
 				inc		hl
@@ -1079,8 +1179,31 @@ def apply(src):
     return src, rep
 
 
+_VI53_STATE = """
+        ORG 0x7F88              ; состояние плеера: 120 Б добивки до плоскости 0 (там переменные кончаются)
+msx_tv_stub: DS 3                ; «out (порт),a / ret» — у i8080 нет out (c)
+msx_tv_c: DS 1                    ; номер счётчика текущего голоса (1 или 2)
+msx_tv_len: DS 1                  ; длина ноты в кадрах
+msx_tv_div: DS 2                  ; делитель текущего такта ноты
+msx_tv_stp: DS 2                  ; HL = запись голоса на время msx_tv
+msx_tv_base: DS 2                 ; адрес текущего блоба (внутри msx_cat)
+msx_tv_divs: DS 2                 ; адрес таблицы делителей (считается в msx_play_tune)
+msx_tv_rem: DS 2                  ; сколько тиков (кадров) осталось до глушения
+msx_tunenum: DS 1                 ; номер мелодии в каталоге (для TUNE-строки журнала)
+msx_tv_v0: DS 16                  ; голос A -> счётчик 1: pc(2), start(2), res, snd, depth, стек 4 слова
+msx_tv_v1: DS 16                  ; голос B -> счётчик 2: та же запись
+        ASSERT $ <= 0x7FB8        ; занято 48 Б; остаток добивки — под зеркало регистров (msx_viflush)
+"""
+
+
 def emit(src, target):
-    """ПОСЛЕ трансляции: подставить ядро драйвера и данные на место маркера."""
+    """ПОСЛЕ трансляции: подставить ядро драйвера и данные на место маркера;
+    состояние плеера — в добивку 0x7F88 (перед SAVEBIN, как делает splash_layout)."""
     mark = '; __A8_SOUND_DRIVER__ (ядро драйвера и данные подставляются ПОСЛЕ трансляции)'
     assert src.count(mark) == 1, 'a8_sound_ay: маркер драйвера'
-    return src.replace(mark, driver(target) + data_block(), 1)
+    src = src.replace(mark, driver(target) + data_block(), 1)
+    src, n = re.subn(r'^        SAVEBIN [^\n]*$', lambda m: _VI53_STATE + m.group(0) + '\n',
+                     src, count=1, flags=re.M)
+    if n != 1:
+        raise SystemExit('a8_sound_ay: строка SAVEBIN не найдена')
+    return src
