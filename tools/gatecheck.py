@@ -316,6 +316,15 @@ MUTS = [
          file="tools/a8_sound_ay.py",
          old="        push de\n        xor a\n        ld (msx_si), a                          ; слот 0 -> канал A\n",
          new="        push hl\n        xor a\n        ld (msx_si), a                          ; слот 0 -> канал A\n"),
+    dict(name="splashzone", gate="splashzone",
+         why="vec_boot (код игры, не заставки: его зовёт загрузчик ДО a8_splash_cont) пишет байт "
+             "в 0x7F00 — в свободный хвост зоны 3 релиза. Картинка, мелодия (c64tune) и старт игры "
+             "при этом целы: запись не задевает ни кода заставки (0x7E00..0x7E6F), ни ячеек плеера, "
+             "а переменные START всё равно чистит. Ловит только трасса писателей зоны",
+         file="tools/a8_vec.py",
+         old="\t\t\t\tld\t\ta, 7\n\t\t\t\tcall\tvec_set_pal\t\t\t; белая палитра (меню)\n",
+         new="\t\t\t\tld\t\ta, 7\n\t\t\t\tld\t\t(0x7F00), a\t\t; ПОРЧА: чужая запись в зону 3\n"
+             "\t\t\t\tcall\tvec_set_pal\t\t\t; белая палитра (меню)\n"),
     dict(name="sfx", gate="aycheck",
          why="период шума эффекта 1 маскируется 0x3F вместо 0x1F: R6 расходится с моделью MSX",
          file="tools/a8_sound_ay.py",
@@ -442,6 +451,15 @@ def gate_result(gate, env=None):
             return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
         r = run(["python3", "tools/a8_regions.py", "build/alien8_vec.lst",
                  "build/alien8_release.lst"], env)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
+    if gate == "splashzone":
+        # РЕЛИЗ: до jp START в зоне 3 (0x7E00..0x7F87, переменные игры) живёт код заставки —
+        # писать туда может только сама заставка, прерывание и плеер мелодии (решение владельца)
+        b = build("release", env)
+        if b.returncode:
+            return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
+        r = run(["node", "tools/splashzone_vec.js", "build/alien8_release.r0m",
+                 "build/alien8_release.sld"], env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "spcheck":
         # ГЛУБИНА СТЕКА против зарезервированного под ним буфера (стенд берёт его размер
