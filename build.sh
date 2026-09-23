@@ -2,7 +2,8 @@
 # Сборка Alien 8.
 #   ./build.sh zx        — исходная ZX-версия из листинга tcdev + гейт «байт в байт с оригиналом»
 #   ./build.sh lockstep  — рекомпиляция в i8080, логика 1:1, вывод заглушен (для локстепа)
-#   ./build.sh release   — цель vec + релизная заставка на старте (ждёт клавишу); гейты не здесь
+#   ./build.sh release   — эталон (цель vec + 1 bpp заставка, несжатый) и итоговый релиз
+#                          (16-цветная заставка, игра сжата zx0); гейты не здесь
 set -e
 cd "$(dirname "$0")"
 TARGET=${1:-zx}
@@ -36,18 +37,29 @@ elif [ "$TARGET" = "vec" ]; then
   python3 tools/check_plane2.py build/alien8_vec.lst --walk build/alien8_vec.asm
   ls -la build/alien8_vec.r0m
 elif [ "$TARGET" = "release" ]; then
-  # Релизная сборка: заставка из src/alien8_title.jpg показывается на старте до меню.
-  # Отдельный образ (build/alien8_release.r0m), гейты гоняются на цели vec.
-  [ -f src/alien8_splash.bin ] || python3 tools/a8_splash.py
-  A8_SPLASH=1 A8_BIN=build/alien8_release.r0m \
-    python3 tools/a8_z80_to_8080.py src/alien8_zx.asm build/alien8_release.asm --target vec
+  # Релиз = ДВА образа.
+  # 1) ЭТАЛОН build/alien8_release_ref.r0m — несжатый, как собирался всегда (A8_SPLASH=1:
+  #    1 bpp заставка из src/alien8_splash.bin, мелодия C64). По нему судят гейты раскладки игры
+  #    (check_plane1/2, a8_regions) и его память сверяет гейт распаковки.
+  # 2) ИТОГОВЫЙ build/alien8_release.r0m — заливается на MiSTer: 16-цветная заставка на весь
+  #    экран, игра на время заставки сжата zx0 и распаковывается по клавише (tools/a8_pack.py).
+  [ -f src/alien8_splash.bin ] && [ -f src/alien8_splash16.bin ] || python3 tools/a8_splash.py
+  A8_SPLASH=1 A8_BIN=build/alien8_release_ref.r0m \
+    python3 tools/a8_z80_to_8080.py src/alien8_zx.asm build/alien8_release_ref.asm --target vec
+  ./tools/sjasmplus --lst=build/alien8_release_ref.lst --sld=build/alien8_release_ref.sld --fullpath build/alien8_release_ref.asm
+  python3 tools/check_i8080.py build/alien8_release_ref.lst
+  python3 tools/check_ixflags.py build/alien8_release_ref.asm
+  python3 tools/check_djnz.py build/alien8_release_ref.asm
+  python3 tools/check_plane1.py build/alien8_release_ref.lst --walk build/alien8_release_ref.asm
+  python3 tools/check_plane2.py build/alien8_release_ref.lst --walk build/alien8_release_ref.asm
+  # компрессор zx0 (Einar Saukas, BSD-3, tools/zx0/LICENSE) — собирается из исходников
+  if [ ! -x build/zx0 ] || [ -n "$(find tools/zx0 -newer build/zx0 -name '*.[ch]')" ]; then
+    ${CC:-cc} -O2 -o build/zx0 tools/zx0/zx0.c tools/zx0/compress.c tools/zx0/memory.c tools/zx0/optimize.c
+  fi
+  python3 tools/a8_pack.py
   ./tools/sjasmplus --lst=build/alien8_release.lst --sld=build/alien8_release.sld --fullpath build/alien8_release.asm
   python3 tools/check_i8080.py build/alien8_release.lst
-  python3 tools/check_ixflags.py build/alien8_release.asm
-  python3 tools/check_djnz.py build/alien8_release.asm
-  python3 tools/check_plane1.py build/alien8_release.lst --walk build/alien8_release.asm
-  python3 tools/check_plane2.py build/alien8_release.lst --walk build/alien8_release.asm
-  ls -la build/alien8_release.r0m
+  ls -la build/alien8_release_ref.r0m build/alien8_release.r0m
 else
   echo "неизвестная цель: $TARGET"; exit 1
 fi
