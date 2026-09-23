@@ -426,7 +426,14 @@ def gate_result(gate, env=None):
         b = build("vec", env)
         if b.returncode:
             return b.returncode, (b.stdout + b.stderr)[-400:]
-        r = run(["python3", "tools/a8_regions.py", "build/alien8_vec.lst"], env)
+        # и релизная сборка (A8_SPLASH=1): у неё свои блоки в нижнем регионе и зоны заставки.
+        # 2026-09-23 релиз не собирался (нижний регион 0x78F6 > 0x7700), а гейт смотрел
+        # только vec — перебор прожил три коммита незамеченным.
+        b = build("release", env)
+        if b.returncode:
+            return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
+        r = run(["python3", "tools/a8_regions.py", "build/alien8_vec.lst",
+                 "build/alien8_release.lst"], env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "spcheck":
         # ГЛУБИНА СТЕКА против зарезервированного под ним буфера (стенд берёт его размер
@@ -552,7 +559,7 @@ def main():
         finally:
             run(["git", "checkout", "--", m["file"]])
             shutil.rmtree(os.path.join(ROOT, "tools", "__pycache__"), ignore_errors=True)
-            build("lockstep"); build("vec")      # обе цели — чистыми, см. докстроку
+            build("lockstep"); build("vec"); build("release")   # все цели — чистыми, см. докстроку (релиз собирает гейт regions)
         ok = rc != 0
         print(f"[{m['name']}] гейт {m['gate']}: {'ПОЙМАЛ' if ok else 'ПРОПУСТИЛ'} (код {rc}) — {m['why']}")
         if not ok:
