@@ -1178,6 +1178,27 @@ def apply(src):
          "        call audio_CE22\n",
          'глушение AY в конце итерации')
 
+    # --- 3а. долгие пути без слива: зеркало сливается раз в итерацию, и счётчик держит
+    #        последний делитель до следующего слива (обычно 1..7 кадров). Смена комнаты
+    #        (exit_screen -> game_loop: build_screen_objects + первая отрисовка, ~38 кадров),
+    #        GAME OVER (экран до мелодии, ~48) и пауза (пока держат ВК) идут без слива — нота
+    #        висела (дефект с железа). У MSX на всех трёх AY молчит: 0x41A3 прошло в конце
+    #        прошлой итерации, тиков до входа нет. Глушим счётчики 1,2 на входе; владельцы 0xFF,
+    #        так что первый слив после пути перезапустит счётчик и зальёт делитель. Гейт —
+    #        aycheck «долгие пути» (GL/GO/PZ). ---
+    site("game_loop:\n        call build_screen_objects\n",
+         "game_loop:\n        call msx_tv_mute   ; смена комнаты / после гибели: нота не висит на отрисовке\n"
+         "        call build_screen_objects\n",
+         'глушение ВИ53 на смене комнаты')
+    site("game_over:\n        call update_special_objs\n",
+         "game_over:\n        call msx_tv_mute   ; GAME OVER: экран рисуется без слива\n"
+         "        call update_special_objs\n",
+         'глушение ВИ53 на GAME OVER')
+    if 'a8_pz_rel:' in src:                          # пауза на ВК — только цель vec
+        site("        ret nz\na8_pz_rel:\n",
+             "        ret nz\n        call msx_tv_mute   ; пауза: нота не висит, пока держат ВК\na8_pz_rel:\n",
+             'глушение ВИ53 на паузе')
+
     # --- 4. инициализация звука: MSX 0x40AA (глушение + тень R7 := 0xBF) — та же точка
     #        слияния START/start_menu, что и у ZX loc_A650 ---
     site("loc_A650:\n        call build_lookup_tbls\n",

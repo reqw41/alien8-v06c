@@ -341,6 +341,22 @@ MUTS = [
          old="\t\t\t\tld\t\ta, 7\n\t\t\t\tcall\tvec_set_pal\t\t\t; белая палитра (меню)\n",
          new="\t\t\t\tld\t\ta, 7\n\t\t\t\tld\t\t(0x7F00), a\t\t; ПОРЧА: чужая запись в зону 3\n"
              "\t\t\t\tcall\tvec_set_pal\t\t\t; белая палитра (меню)\n"),
+    dict(name="roomsilence", gate="aycheck",
+         why="снято глушение ВИ53 на входе в game_loop: на смене комнаты счётчик держит последний "
+             "делитель всю отрисовку новой комнаты (~38 кадров) — дефект с железа",
+         file="tools/a8_sound_ay.py",
+         old='"game_loop:\\n        call msx_tv_mute   ; смена комнаты / после гибели: нота не висит на отрисовке\\n"',
+         new='"game_loop:\\n"'),
+    dict(name="gameoversilence", gate="aycheck",
+         why="снято глушение ВИ53 на входе в game_over: нота висит на экране GAME OVER до мелодии",
+         file="tools/a8_sound_ay.py",
+         old='"game_over:\\n        call msx_tv_mute   ; GAME OVER: экран рисуется без слива\\n"',
+         new='"game_over:\\n"'),
+    dict(name="pausesilence", gate="aycheck",
+         why="снято глушение ВИ53 на паузе: нота висит, пока держат ВК",
+         file="tools/a8_sound_ay.py",
+         old='"        ret nz\\n        call msx_tv_mute   ; пауза: нота не висит, пока держат ВК\\na8_pz_rel:\\n"',
+         new='"        ret nz\\na8_pz_rel:\\n"'),
     dict(name="sfx", gate="aycheck",
          why="период шума эффекта 1 маскируется 0x0F вместо 0x1F: R6, а с ним делитель шума "
              "(R6&0x1F)*256 на ВИ53 расходятся с моделью MSX. Прежняя порча 0x3F на ВИ53 мертва — "
