@@ -79,6 +79,16 @@ NOBJSCEN = [('покой', 'inputs_idle.txt', None, '60'),
             ('гибель в соседней', 'inputs_death.txt', None, '600'),
             ('137 + гибель', 'inputs_death137.txt', '137', '600')]
 
+# сценарии гейта aycheck: (метка, итераций, файл ввода стенда или None, окружение)
+AYSCEN = [('ходьба', '600', 'inputs_alive.txt', {}),                       # эффекты 3,4,5,7
+          ('шум', '60', None, {"A8SFX": "1:0:31:0:0"}),                    # эффект 1, отложенная нота
+          ('шум 180 тиков', '40', None, {"A8SFX": "1:0:180:0:0"}),         # 56 тиков на итерацию; на
+                                                                           #  3-м сливе c = 12: громкость 6 = порог
+          ('чирп', '40', None, {"A8SFX": "2:0:15:0:0"}),
+          ('эффект 8', '40', None, {"A8SFX": "8:0:7:0:0"}),
+          ('список 9', '40', None, {"A8SFX": "9:1:40:e9b"}),
+          ('лесенка', '40', None, {"A8LADDER": "15"})]
+
 MUTS = [
     dict(name="render", gate="render_gate",
          why="окно update_screen на строку ниже (приёмник ld l,32 -> 33): чистый ВЫВОД, логика не меняется",
@@ -196,10 +206,12 @@ MUTS = [
              '               "        call vec_palwait\\n"\n'
              '               "        call vec_wipe0\\n"\n'),
     dict(name="tune", gate="tunecheck",
-         why="команда END потока нот не распознаётся (cp 7 -> cp 8): мелодия не кончается",
+         why="плеер мелодий msx_tv_note считает длину ноты на кадр меньше (`sub 1` -> `sub 2`: "
+             "res = длина-2): каждая нота короче, делители по кадрам расходятся с блобом "
+             "(старая порча cp 7 -> cp 8 в msx_fetch ушла вместе с real-time плеером MSX)",
          file="tools/a8_sound_ay.py",
-         old="\t\t\t\tcp\t\t7\n\t\t\t\tjp\t\tz, mf_end\n",
-         new="\t\t\t\tcp\t\t8\n\t\t\t\tjp\t\tz, mf_end\n"),
+         old="\t\t\t\tsub\t\t1\t\t\t\t\t\t; кадр взятия ноты уже потрачен",
+         new="\t\t\t\tsub\t\t2\t\t\t\t\t\t; ПОРЧА: кадр взятия ноты уже потрачен"),
     dict(name="mousetbl", gate="zxpix",
          why="снята починка адреса таблицы направлений робомыши: обратно `sub_B0E7+0x21` — "
              "смещение, верное только для длины тела НА Z80. Это и был дефект владельца "
@@ -326,10 +338,12 @@ MUTS = [
          new="\t\t\t\tld\t\ta, 7\n\t\t\t\tld\t\t(0x7F00), a\t\t; ПОРЧА: чужая запись в зону 3\n"
              "\t\t\t\tcall\tvec_set_pal\t\t\t; белая палитра (меню)\n"),
     dict(name="sfx", gate="aycheck",
-         why="период шума эффекта 1 маскируется 0x3F вместо 0x1F: R6 расходится с моделью MSX",
+         why="период шума эффекта 1 маскируется 0x0F вместо 0x1F: R6, а с ним делитель шума "
+             "(R6&0x1F)*256 на ВИ53 расходятся с моделью MSX. Прежняя порча 0x3F на ВИ53 мертва — "
+             "слив сам берёт R6 & 0x1F (mvc_noise), и гейт её справедливо пропускал",
          file="tools/a8_sound_ay.py",
          old="\t\t\t\tcpl\n\t\t\t\tand\t\t0x1F\n\t\t\t\tld\t\tb, a\n\t\t\t\tld\t\tc, 6\n",
-         new="\t\t\t\tcpl\n\t\t\t\tand\t\t0x3F\n\t\t\t\tld\t\tb, a\n\t\t\t\tld\t\tc, 6\n"),
+         new="\t\t\t\tcpl\n\t\t\t\tand\t\t0x0F\n\t\t\t\tld\t\tb, a\n\t\t\t\tld\t\tc, 6\n"),
 ]
 
 ENV = {"i8080": {"A8_GATECHECK_I8080": "1"},
@@ -534,13 +548,22 @@ def gate_result(gate, env=None):
         r = run(["node", "tools/tunecheck_vec.js", "build/alien8_vec.r0m",
                  "build/alien8_vec.sld"], env)
     elif gate == "aycheck":
-        # эффект 1 (шум) сценарием ходьбы не достаётся — запускаем принудительно,
-        # журнал записей AY сверяется с моделью поканально
-        e = dict(env or {}); e["A8SFX"] = "1:0:31:0:0"
-        t = run(["node", "tools/aytrace_vec.js", "build/alien8_vec.r0m",
-                 "build/alien8_vec.sld", "60"], e)
-        open(os.path.join(ROOT, "build", "ay_gatecheck.txt"), "w", encoding="utf-8").write(t.stdout)
-        r = run(["python3", "tools/aycheck.py", "build/ay_gatecheck.txt"], env)
+        # ЭФФЕКТЫ НА ВИ53: журнал tools/aytrace_vec.js (делители счётчиков 1/2 по кадрам и по
+        # сливам) против модели MSX + конверсии слива (tools/aycheck.py). Сценарии: ходьба стенда
+        # даёт эффекты 3,4,5,7; эффекты 1,2,8,9 ходьбой не достаются — запуск стендом (A8SFX);
+        # длинный шум 180 тиков держит движок занятым весь объектный цикл — инвариант 56 тиков;
+        # A8LADDER — путь криокамеры loc_AFF8 с лесенкой (8 сливов на вызов, мимо msx_frame_off)
+        for tag, iters, inp, ev in AYSCEN:
+            e = dict(env or {}); e.update(ev)
+            t = run(["node", "tools/aytrace_vec.js", "build/alien8_vec.r0m", "build/alien8_vec.sld",
+                     iters] + ([os.path.join(STAND, inp)] if inp else []), e)
+            if t.returncode:
+                return t.returncode, (tag + ": журнал не снялся: ") + (t.stdout + t.stderr)[-300:]
+            open(os.path.join(ROOT, "build", "ay_gatecheck.txt"), "w", encoding="utf-8").write(t.stdout)
+            r = run(["python3", "tools/aycheck.py", "build/ay_gatecheck.txt"], env)
+            if r.returncode:
+                return r.returncode, (tag + ": ") + (r.stdout + r.stderr)[-300:]
+        return 0, "все сценарии эффектов: делители ВИ53 совпали с моделью"
     elif gate == "palseq":
         # ПАЛИТРА ПРОТИВ СТИРАНИЯ ЭКРАНА: A8_IRQDROP=1 обязателен — без модели «прерывание не
         # защёлкивается» кадры под di не теряются, и момент загрузки палитры сдвигается
