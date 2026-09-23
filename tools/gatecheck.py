@@ -361,6 +361,12 @@ MUTS = [
          file="tools/a8_pack.py",
          old="\t\t\t\tadd\t\ta, 41\n",
          new="\t\t\t\tadd\t\ta, 40\t\t; ПОРЧА\n"),
+    dict(name="splashpal", gate="splashpix",
+         why="итоговый релиз: ISR заставки грузит палитру со сдвигом на запись (spl_pal+14 вместо "
+             "+15) — плоскости в памяти целы, мелодия и распаковка тоже; неверны только цвета на экране",
+         file="tools/a8_pack.py",
+         old="\t\t\t\tld\t\thl, spl_pal + 15\n",
+         new="\t\t\t\tld\t\thl, spl_pal + 14\t; ПОРЧА\n"),
     dict(name="roomsilence", gate="aycheck",
          why="снято глушение ВИ53 на входе в game_loop: на смене комнаты счётчик держит последний "
              "делитель всю отрисовку новой комнаты (~38 кадров) — дефект с железа",
@@ -522,6 +528,14 @@ def gate_result(gate, env=None):
         if b.returncode:
             return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
         r = run(["node", "tools/c64tune_vec.js", "build/alien8_release.r0m"], env)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
+    if gate == "splashpix":
+        # ПИКСЕЛИ 16-ЦВЕТНОЙ ЗАСТАВКИ на кадрах 40 и 8500: плоскости в памяти, защёлкнутая палитра
+        # и кадр эмулятора (картинка + чёрные поля/бордюр) против выхода tools/a8_splash.py
+        b = build("release", env)
+        if b.returncode:
+            return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
+        r = run(["node", "tools/splashpix_vec.js", "build/alien8_release.r0m"], env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "unpack":
         # ИТОГОВЫЙ РЕЛИЗ (tools/a8_pack.py): распаковка на месте без чтения затёртого; к
