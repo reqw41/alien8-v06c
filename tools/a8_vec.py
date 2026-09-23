@@ -1718,7 +1718,7 @@ def header():
 # нижнего региона; вложенные в tail() строки уводили маркер за собой
 # (замер 2026-09-22: vec_boot уезжал на 0x74E5 вместо 0xC5E0).
 _SPLASH_CLR = "\t\t\t\tld\t\thl, 0x8000\t\t\t; очистить плоскость 0 (экран)\n"
-_SPLASH_JMP = "\t\t\t\tjp\t\ta8_splash_cont\t\t; заставка: показать/ждать/очистить (нижний регион)\n"
+_SPLASH_JMP = "\t\t\t\tjp\t\ta8_splash_cont\t\t; заставка: показать/ждать/очистить (зона 3, затирается START)\n"
 _SPLASH_MARKER = "        ASSERT $ <= 0x7700   ; нижний регион не должен дорасти до стека\n"
 _SPLASH_CONT = (
     "; ---- релизная заставка: показать 8K из плоскости 0, ждать клавишу ----\n"
@@ -1785,17 +1785,25 @@ _SPLASH_CONT = (
 # Данные src/c64_tune.bin (tools/a8_tune_c64.py) встают по 0xF100 — reverse_bits_table
 # и таблицы сдвига строит build_lookup_tbls из START, в образе там нули: до jp START
 # область свободна и затирается игрой, что и нужно. Состояние голосов — 0xFF00.
-# Код плеера — в нижнем регионе (после a8_splash_cont, до ASSERT $ <= 0x7700).
+# Код заставки — ТОЛЬКО в памяти, которую затирает START (нижний регион не растёт ни на байт):
+# зона 1 — a8_sp_isr сразу за мелодией (до 0xFF00); зона 2 — за состоянием голосов 0xFF7C..0xFFFF
+# (a8_tune_init, a8_tune_tick); зона 3 — переменные игры 0x7E00..0x7F87 (копир, ожидание клавиши,
+# a8_tune_off). Интерпретатор — общий msx_tv игры (a8_sound_ay.py), он в нижнем регионе и так.
 # Порты ВИ53 на Векторе ПЕРЕСТАВЛЕНЫ: управление 0x08, счётчики 0/1/2 = 0x0B/0x0A/0x09.
 # Управляющее слово ПЕРЕЗАПУСКАЕТ счётчик — слать только на переходе тишина->звук;
 # тишина = управляющее слово БЕЗ делителя; при возврате из правила кэш бить (snd=0xFF).
 # Грамматику данных и эталонный decode() — докстринг tools/a8_tune_c64.py.
-_TUNE_CODE = (
-    "; ---- плеер мелодии C64 (ВИ53, три голоса; данные 0xF100, состояние 0xFF00) ----\n"
+_TUNE_ISR = (
+    "; ---- заставка, зона 1 (0xFEF3.., между концом данных мелодии и состоянием голосов) ----\n"
     "a8_sp_isr:\t\t\tpush\taf\t\t\t; RST 38h на время заставки: не трогать счётчик 0 (он голос A)\n"
     "\t\t\t\tld\t\ta, 0xFF\t\t; и выставить флаг кадра: тик плеера делает цикл ожидания клавиши\n"
     "\t\t\t\tld\t\t(a8_sp_flag), a\n"
     "\t\t\t\tjp\t\tvec_isr_nosw\n"
+)
+
+
+_TUNE_CODE = (
+    "; ---- заставка, зона 2 (за состоянием трёх голосов 0xFF00+3*41+флаг, до 0xFFFF) ----\n"
     "a8_tune_init:\t\t\tld\t\thl, a8_tune\t\t; общий интерпретатор msx_tv (a8_sound_ay.py): база блока — в его ячейку\n"
     "\t\t\t\tld\t\t(msx_tv_base), hl\n"
     "\t\t\t\tld\t\thl, (a8_tune + 6)\t; число правил nr -> база делителей: divs = a8_tune + 10 + 2nr (nd в адресе не участвует)\n"
@@ -1814,15 +1822,8 @@ _TUNE_CODE = (
     "\t\t\t\tout\t\t(0x08), a\n"
     "\t\t\t\tld\t\ta, 0xB6\n"
     "\t\t\t\tout\t\t(0x08), a\n"
-    "\t\t\t\tld\t\thl, 0x0038\t\t; RST 38h -> a8_sp_isr (jp vec_isr вернёт a8_tune_off)\n"
-    "\t\t\t\tld\t\ta, 0xC3\n"
-    "\t\t\t\tld\t\t(hl), a\n"
-    "\t\t\t\tinc\t\thl\n"
-    "\t\t\t\tld\t\ta, low a8_sp_isr\n"
-    "\t\t\t\tld\t\t(hl), a\n"
-    "\t\t\t\tinc\t\thl\n"
-    "\t\t\t\tld\t\ta, high a8_sp_isr\n"
-    "\t\t\t\tld\t\t(hl), a\n"
+    "\t\t\t\tld\t\thl, a8_sp_isr\t; RST 38h -> a8_sp_isr (a8_tune_off вернёт vec_isr). jp (0xC3) по 0x0038 уже в образе;\n"
+    "\t\t\t\tld\t\t(0x0039), hl\t\t; адрес — ОДНОЙ командой: прерывание между двумя байтами прыгнуло бы в смесь адресов\n"
     "\t\t\t\txor\t\ta\t\t\t\t; флаг кадра с нуля: первый тик — на следующем прерывании\n"
     "\t\t\t\tld\t\t(a8_sp_flag), a\n"
     "\t\t\t\tld\t\thl, a8_tune\t\t; голосам: pc = start = база + указатель (младший байт базы 0x00)\n"
@@ -1876,17 +1877,14 @@ _TUNE_CODE = (
     "\t\t\t\tcp\t\t3\n"
     "\t\t\t\tjp\t\tc, att_v\n"
     "\t\t\t\tret\n"
+)
+
+
+_TUNE_OFF = (
     "; перед jp START: счётчик 0 снова секундомер бюджета di (как vec_boot), 1 и 2 молчат,\n"
     "; RST 38h -> vec_isr. Данные 0xF100 и состояние 0xFF00 затирает build_lookup_tbls.\n"
-    "a8_tune_off:\t\t\tld\t\thl, 0x0038\n"
-    "\t\t\t\tld\t\ta, 0xC3\n"
-    "\t\t\t\tld\t\t(hl), a\n"
-    "\t\t\t\tinc\t\thl\n"
-    "\t\t\t\tld\t\ta, low vec_isr\n"
-    "\t\t\t\tld\t\t(hl), a\n"
-    "\t\t\t\tinc\t\thl\n"
-    "\t\t\t\tld\t\ta, high vec_isr\n"
-    "\t\t\t\tld\t\t(hl), a\n"
+    "a8_tune_off:\t\t\tld\t\thl, vec_isr\n"
+    "\t\t\t\tld\t\t(0x0039), hl\t\t; RST 38h -> vec_isr одной командой (см. a8_tune_init)\n"
     "\t\t\t\tld\t\ta, 0x30\t\t\t; счётчик 0: режим 0, оба байта\n"
     "\t\t\t\tout\t\t(0x08), a\n"
     "\t\t\t\tld\t\ta, 0xFF\n"
@@ -1904,8 +1902,18 @@ _TUNE_STATE = (
     "\n        ORG 0xFF00              ; состояние голосов плеера и его ячейки (обратимы: затрутся игрой)\n"
     "a8_tune_st: DS 41*3             ; pc, start, res, snd, depth, стек возвратов 16 слов (шаг 41: слот +39/+40 при depth=16 не должен задевать pc следующего голоса)\n"
     "a8_sp_flag: DS 1                ; флаг кадра для тика плеера\n"
-    "        ASSERT $ <= 0xFF90   ; состояние плеера не должно дорасти до конца страницы\n"
+    "        ASSERT high a8_tune_st == high (a8_tune_st + 41*3 - 1)   ; msx_tv считает адреса полей по младшему байту\n"
 )
+
+
+# Зона 3 — переменные игры seed_1..seed_1+0x788: START первой же командой (clr_mem)
+# чистит ровно их, а до START туда не пишет никто (замер: 0 записей от сброса до START,
+# ISR заставки ходит только в страницу 0 и добивку). START ДО чистки читает один байт
+# other_objs_here+0x70 (затравка seed_1) — зона 3 обязана лежать выше него, иначе
+# затравка релиза разойдётся с vec. Сюда — то, что не влезло в зоны 1/2 (0xF100..0xFFFF
+# = 3840 Б: мелодия 3571 + состояние 124 + код заставки ~243 — перебор ~100 Б).
+_SPLASH_V_ORG = 0x7E00
+_SPLASH_V_END = 0x7F88   # = seed_1 + 0x788 (ASSERT ниже сверяет с START)
 
 
 def splash_layout(src):
@@ -1916,9 +1924,17 @@ def splash_layout(src):
     if src.count(_SPLASH_MARKER) != 1:
         raise SystemExit("a8_splash: ASSERT нижнего региона не найден однократно")
     src = src.replace(_SPLASH_CLR, _SPLASH_JMP, 1)
-    src = src.replace(_SPLASH_MARKER, _SPLASH_CONT + _SPLASH_MARKER, 1)
-    src = src.replace(_SPLASH_MARKER, _TUNE_CODE + _SPLASH_MARKER, 1)
-    src = src.replace(_SPLASH_MARKER, _SPLASH_MARKER + _TUNE_STATE, 1)
+    # всё, что нужно только до jp START, — в памяти, которую START затирает (нижний регион не растёт)
+    zone3 = ("\n        ORG 0x%04X              ; заставка, зона 3: переменные игры, их чистит START (clr_mem)\n"
+             "a8_sp_v:\n" % _SPLASH_V_ORG
+             + _SPLASH_CONT + _TUNE_OFF +
+             "        ASSERT seed_1 + 0x788 == 0x%04X   ; START чистит seed_1..+0x788 — ровно зону 3\n"
+             "        ASSERT a8_sp_v >= other_objs_here + 0x71   ; затравку seed_1 START читает ДО чистки\n"
+             "        ASSERT $ <= 0x%04X   ; заставка, зона 3 (переменные игры) не должна выйти за чистку START\n"
+             % (_SPLASH_V_END, _SPLASH_V_END))
+    zone2 = (_TUNE_STATE + _TUNE_CODE +
+             "        ASSERT $ <= 0x10000   ; заставка, зона 2 (0xFF00: состояние голосов + код) до конца памяти\n")
+    src = src.replace(_SPLASH_MARKER, _SPLASH_MARKER + zone3 + zone2, 1)
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "alien8_splash.bin")
     data = open(path, "rb").read()
     if len(data) != 8192:
@@ -1936,7 +1952,9 @@ def splash_layout(src):
               "a8_tune:\n"]
     for i in range(0, len(tune), 16):
         tlines.append("        DB " + ", ".join(f"0x{b:02X}" for b in tune[i:i + 16]) + "\n")
-    tlines.append("        ASSERT a8_tune + {} <= 0xFF00   ; мелодия не должна налезть на состояние голосов\n".format(len(tune)))
+    tlines.append(_TUNE_ISR)   # зона 1: от конца данных мелодии до состояния голосов
+    tlines.append("        ASSERT a8_sp_isr == a8_tune + {}   ; зона 1 начинается сразу за мелодией\n".format(len(tune)))
+    tlines.append("        ASSERT $ <= 0xFF00   ; заставка, зона 1 (за мелодией) не должна налезть на состояние голосов\n")
     db = db + "".join(tlines)
     src, n = re.subn(r'^        SAVEBIN [^\n]*$', lambda m: db + m.group(0), src, count=1, flags=re.M)
     if n != 1:
