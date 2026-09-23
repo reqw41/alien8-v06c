@@ -521,6 +521,11 @@ def gate_result(gate, env=None):
         e = dict(env or {}); e["A8_IRQDROP"] = "1"
         r = run(["node", "tools/palseq_vec.js", "build/alien8_vec.r0m",
                  "build/alien8_vec.sld", "250"], e)
+    elif gate == "recolour":
+        # ПЕРЕКРАСКА loc_AFF8 -> loc_B005 (вентиль на гнезде криокамеры): 16 ступеней мигания
+        # обязаны кончиться, лесенка audio_msx_ladder — прозвучать на счётчиках 1/2 ВИ53
+        r = run(["node", "tools/recolourcheck_vec.js", "build/alien8_vec.r0m",
+                 "build/alien8_vec.sld"], env)
     elif gate == "kbcheck":
         # эталон tools/kbref.txt лежит В РЕПОЗИТОРИИ: без него гейт сверял бы таблицу
         # готовых ответов read_key саму с собой и любую правку vec_zxmap пропускал (§22 KL)
