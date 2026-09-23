@@ -33,6 +33,19 @@
 сверяются — мелодии судит tools/tunecheck_vec.js; на TUNE/TEND владельцы сбрасываются, как в
 msx_tv_mute.
 
+ДОЛГИЕ ПУТИ БЕЗ СЛИВА (дефект с железа: нота висит при смене комнаты). Слив раз в итерацию
+держит ноту до следующего слива — на обычной итерации это 1..7 кадров, но смена комнаты
+(GL: game_loop -> build_screen_objects + первая отрисовка), GAME OVER (GO: экран рисуется до
+мелодии) и пауза (PZ: ждём отпускания ВК) идут десятки кадров без слива. У MSX на всех трёх
+путях AY молчит: глушение 0x41A3 прошло в конце прошлой итерации, а тиков эффектов до входа
+в путь нет (игрок — первый объект таблицы, exit_screen срабатывает до первого тика; GAME OVER
+и пауза стоят после 0x41A3). Поэтому на входе в путь счётчики 1,2 глушатся (msx_tv_mute), и
+гейт требует: в каждом кадре ПОСЛЕ кадра события и до следующего слива (VF) или мелодии
+(TUNE) делители обоих счётчиков = 0. Кадр самого события не требуется: граница кадра может
+лечь между событием и глушением. Модель на событии делает то же msx_tv_mute (владельцы 0xFF).
+Ключ --need GL,GO,PZ — такие события обязаны встретиться хотя бы раз со звучащим на входе
+счётчиком (иначе проверка вакуумна).
+
 Код возврата: 0 — расхождений нет; 1 — есть расхождения или выборка пуста/вакуумна.
 """
 import os
@@ -202,7 +215,12 @@ class Model:
 
 
 def main():
-    if len(sys.argv) < 2:
+    args = [a for a in sys.argv[1:] if not a.startswith('--need')]
+    need = set()
+    for a in sys.argv[1:]:
+        if a.startswith('--need='):
+            need |= set(a.split('=', 1)[1].split(','))
+    if not args:
         print(__doc__)
         return 1
     m = Model()
@@ -225,7 +243,12 @@ def main():
     vexp = None
     nfr_open = 0
     tk_full = tk_bad = 0
-    lines = [ln.split() for ln in open(sys.argv[1], encoding='utf-8')]
+    lines = [ln.split() for ln in open(args[0], encoding='utf-8')]
+    lng = None                            # открытый долгий путь: [вид, кадр события]
+    cur = [0, 0, 0]                       # делители счётчиков по журналу (последние V / VE)
+    lng_n = {}                            # вид -> [событий, со звуком на входе]
+    lng_bad = 0
+    lng_hang = {}                         # вид -> худшее число кадров со звуком после события
 
     # Сверка кадра: делитель на конец кадра (V) и НАКОПИТЕЛЬНОЕ число управляющих слов и
     # загрузок (P) — накопительно, потому что слив может перейти границу кадра: в кадре, на конец
@@ -254,6 +277,17 @@ def main():
         if vopen:
             nfr_open += 1
             return
+        if lng is not None and f > lng[1]:
+            vs = [o.get(c, [0])[0] or 0 for c in (1, 2)]
+            if vs[0] or vs[1]:
+                nonlocal lng_bad
+                lng_bad += 1
+                bad += 1
+                lng_hang[lng[0]] = max(lng_hang.get(lng[0], 0), f - lng[1])
+                if shown < 12:
+                    shown += 1
+                    print('  кадр %d: %s с кадра %d, слива не было, а счётчики звучат: д1 д2 = %s'
+                          % (f, lng[0], lng[1], vs))
         nfr += 1
         if m.eff[1] or m.eff[2]:
             nfr_snd += 1
@@ -280,6 +314,7 @@ def main():
                 check_frame(pend_f)
                 tframe = playing
             obs.setdefault(f, {}).setdefault(c, [v, 0, 0])[0] = v
+            cur[c] = v
             pend_f = f
             continue
         if t == 'P':
@@ -292,6 +327,16 @@ def main():
             check_frame(pend_f)
             tframe = playing
             pend_f = None
+        if t in ('GL', 'GO', 'PZ'):
+            ent = lng_n.setdefault(t, [0, 0])
+            ent[0] += 1
+            if cur[1] or cur[2]:
+                ent[1] += 1
+            lng = [t, int(p[1])]
+            m.mute()                                   # msx_tv_mute на входе в путь
+            continue
+        if t in ('TUNE', 'VF'):
+            lng = None
         if t == 'TUNE':
             playing = True
             tframe = True
@@ -338,6 +383,7 @@ def main():
             elif t == 'VE':
                 vopen = False
                 got = [int(x) for x in p[2:8]]
+                cur[1], cur[2] = got[0], got[1]
                 if got != vexp:
                     bad += 1
                     if shown < 12:
@@ -395,6 +441,13 @@ def main():
     print('эффекты: запущены id %s; слышны на сливе id %s'
           % (','.join(map(str, sorted(ids))) or '-', ','.join(sorted(heard)) or '-'))
     print('тики: итераций с занятым движком целиком %d, из них не по %d тиков: %d' % (tk_full, TICKS, tk_bad))
+    print('долгие пути без слива (GL смена комнаты, GO GAME OVER, PZ пауза): %s; кадров со звуком после входа %d'
+          % (', '.join('%s %d (со звуком на входе %d, худшее висение %d кадров)'
+                       % (k, v[0], v[1], lng_hang.get(k, 0)) for k, v in sorted(lng_n.items())) or '-', lng_bad))
+    for k in sorted(need):
+        if lng_n.get(k, [0, 0])[1] == 0:
+            bad += 1
+            print('ГЕЙТ ВАКУУМЕН: событие %s со звучащим счётчиком на входе не встретилось' % k)
     if nfr == 0 or nfl == 0:
         print('ГЕЙТ ПУСТ: нет ни сверенных кадров, ни сливов')
         return 1

@@ -79,8 +79,12 @@ NOBJSCEN = [('покой', 'inputs_idle.txt', None, '60'),
             ('гибель в соседней', 'inputs_death.txt', None, '600'),
             ('137 + гибель', 'inputs_death137.txt', '137', '600')]
 
-# сценарии гейта aycheck: (метка, итераций, файл ввода стенда или None, окружение)
-AYSCEN = [('ходьба', '600', 'inputs_alive.txt', {}),                       # эффекты 3,4,5,7
+# сценарии гейта aycheck: (метка, итераций, файл ввода стенда или None, окружение[, --need])
+# --need=GL/GO/PZ: долгий путь без слива (смена комнаты / GAME OVER / пауза) обязан встретиться
+# со звучащим на входе счётчиком — и счётчики обязаны замолчать (aycheck.py, «долгие пути»)
+AYSCEN = [('ходьба', '600', 'inputs_alive.txt', {}, 'GL'),                 # эффекты 3,4,5,7; 2 смены комнаты
+          ('пауза', '40', 'inputs_alive.txt', {"A8PAUSE": "1"}, 'PZ'),      # ВК сразу за звучащим сливом
+          ('GAME OVER', '600', 'inputs_death.txt', {"A8LIVES": "0", "A8STOPTUNE": "1"}, 'GO'),
           ('шум', '60', None, {"A8SFX": "1:0:31:0:0"}),                    # эффект 1, отложенная нота
           ('шум 180 тиков', '40', None, {"A8SFX": "1:0:180:0:0"}),         # 56 тиков на итерацию; на
                                                                            #  3-м сливе c = 12: громкость 6 = порог
@@ -553,14 +557,15 @@ def gate_result(gate, env=None):
         # даёт эффекты 3,4,5,7; эффекты 1,2,8,9 ходьбой не достаются — запуск стендом (A8SFX);
         # длинный шум 180 тиков держит движок занятым весь объектный цикл — инвариант 56 тиков;
         # A8LADDER — путь криокамеры loc_AFF8 с лесенкой (8 сливов на вызов, мимо msx_frame_off)
-        for tag, iters, inp, ev in AYSCEN:
+        for tag, iters, inp, ev, *need in AYSCEN:
             e = dict(env or {}); e.update(ev)
             t = run(["node", "tools/aytrace_vec.js", "build/alien8_vec.r0m", "build/alien8_vec.sld",
                      iters] + ([os.path.join(STAND, inp)] if inp else []), e)
             if t.returncode:
                 return t.returncode, (tag + ": журнал не снялся: ") + (t.stdout + t.stderr)[-300:]
             open(os.path.join(ROOT, "build", "ay_gatecheck.txt"), "w", encoding="utf-8").write(t.stdout)
-            r = run(["python3", "tools/aycheck.py", "build/ay_gatecheck.txt"], env)
+            r = run(["python3", "tools/aycheck.py", "build/ay_gatecheck.txt"]
+                    + (["--need=" + need[0]] if need else []), env)
             if r.returncode:
                 return r.returncode, (tag + ": ") + (r.stdout + r.stderr)[-300:]
         return 0, "все сценарии эффектов: делители ВИ53 совпали с моделью"

@@ -41,6 +41,17 @@
 //                                     aycheck.py с моделью: 56)
 //   INIT <кадр>                     — вызов msx_snd_init (слоты, тень R7, отложенные ноты сброшены)
 //   LAD <кадр>                      — вызов audio_msx_ladder (лесенка пишет зеркало мимо движка)
+//   GL <кадр> <атрибут комнаты>     — вход в game_loop (смена комнаты: exit_screen; после гибели:
+//                                     player_dies -> lose_life): дальше build_screen_objects и
+//                                     первая отрисовка комнаты — десятки кадров без слива
+//   GO <кадр>                       — вход в game_over (экран GAME OVER рисуется без слива)
+//   PZ <кадр>                       — пауза взята (a8_pz_rel: ждём отпускания ВК, слива нет)
+//
+//   A8LIVES=<n>  при входе в игру жизней n (0 + inputs_death.txt = первая гибель -> GAME OVER)
+//   A8PAUSE=<n>  с итерации n: на первом сливе, оставившем ноту, нажать ВК; через 24 кадра после PZ отпустить (пауза встала, «блип»);
+//                через 24 кадра после конца «блипа» нажать снова (снять паузу), через 8 отпустить
+//   A8STOPTUNE=1 остановить журнал через 2 кадра после первой мелодии в игре (GAME OVER ждёт
+//                клавишу вечно)
 "use strict";
 const fs = require("fs"), vm = require("vm");
 const base = "/Users/boris/projects/vector06js";
@@ -53,7 +64,7 @@ for (const l of fs.readFileSync(SLD, "latin1").split("\n")) {
   if (p.length >= 8 && p[6] === "L") { const n = p[7].split(",")[1]; if (n && !(n in L)) L[n] = +p[5]; }
 }
 for (const need of ["msx_play", "msx_sfx", "msx_tunenum", "msx_frame_off", "msx_sfx_tick", "msx_snd_init",
-                    "audio_msx_ladder", "msx_viflush", "loc_AFF8", "seed_2", "curr_room_attrib"])
+                    "audio_msx_ladder", "msx_viflush", "loc_AFF8", "game_loop", "game_over", "a8_pz_rel", "lives", "audio_msx_blip", "vec_kbmat", "seed_2", "curr_room_attrib"])
   if (L[need] === undefined) { console.log("нет метки " + need + " — сборка без звука?"); process.exit(2); }
 const SEED2HI = L.seed_2 + 1, ROOM = L.curr_room_attrib, VKBD = L.vkbd;
 const lst = fs.readFileSync(ROM.replace(/\.r0m$/, ".lst"), "latin1").split("\n");
@@ -95,7 +106,7 @@ const KEYS = { shift: [0, 0], z: [0, 1], x: [0, 2], c: [0, 3], v: [0, 4], a: [1,
   q: [2, 0], w: [2, 1], e: [2, 2], r: [2, 3], t: [2, 4], "1": [3, 0], "2": [3, 1], "3": [3, 2], "4": [3, 3], "5": [3, 4],
   "0": [4, 0], "9": [4, 1], "8": [4, 2], "7": [4, 3], "6": [4, 4], p: [5, 0], o: [5, 1], i: [5, 2], u: [5, 3], y: [5, 4],
   enter: [6, 0], l: [6, 1], k: [6, 2], j: [6, 3], h: [6, 4], space: [7, 0], sym: [7, 1], m: [7, 2], n: [7, 3], b: [7, 4] };
-const VKEYS = { z: [7, 0x04], x: [7, 0x01], a: [4, 0x02], q: [6, 0x02], "0": [2, 0x01], space: [7, 0x80] };
+const VKEYS = { vk: [0, 0x04], z: [7, 0x04], x: [7, 0x01], a: [4, 0x02], q: [6, 0x02], "0": [2, 0x01], space: [7, 0x80] };
 const rows = new Uint8Array(8).fill(0xFF);
 function key(k, down) {
   if (VKBD === undefined) { const [r, b] = VKEYS[k]; if (down) keyboard.matrix[r] |= b; else keyboard.matrix[r] &= ~b; return; }
@@ -138,7 +149,8 @@ function endFrame() {             // итог кадра `frame` (вызыват
 
 // ---------------- события драйвера ----------------
 const T = L.graphic_objs_tbl, SFX = L.msx_sfx, PLAY = L.msx_play, FOFF = L.msx_frame_off,
-      TICK = L.msx_sfx_tick, VFL = L.msx_viflush, SINIT = L.msx_snd_init, LADDER = L.audio_msx_ladder;
+      TICK = L.msx_sfx_tick, VFL = L.msx_viflush, SINIT = L.msx_snd_init, LADDER = L.audio_msx_ladder,
+      GLOOP = L.game_loop, GOVER = L.game_over, PZREL = L.a8_pz_rel;
 let phase = process.env.A8MENU ? "menuplay" : "menu", iter = 0, startIter = 0, startseq = null;
 // A8SFX: hi:lo можно задать именем списка эффекта 9 — "e9a" / "e9b" (адрес берётся из .sld)
 const FSFX = process.env.A8SFX ? (function (p) {
@@ -148,6 +160,7 @@ const FSFX = process.env.A8SFX ? (function (p) {
 })(process.env.A8SFX.split(":")) : null;
 const FSFXIT = +(process.env.A8SFXIT || 10);
 const LADIT = +(process.env.A8LADDER || 0); let ladDone = false;
+const PAUSEIT = +(process.env.A8PAUSE || 0); let pzState = 0, pzFrame = -1, stopAt = -1, pzArm = true;
 memory.write = function (a, w, s) {
   a &= 0xffff;
   if (phase === "menu" && cpu.pc === SYNC) {
@@ -155,7 +168,8 @@ memory.write = function (a, w, s) {
     phase = "init";
   }
   if (process.env.A8ROOM && phase === "init" && (a === T + 8 || a === T + 40)) w = +process.env.A8ROOM;
-  if (a === ROOM && phase === "init" && w !== 0) { phase = "game"; key("0", false); }
+  if (a === ROOM && phase === "init" && w !== 0) { phase = "game"; key("0", false);
+    if (process.env.A8LIVES !== undefined) poke(L.lives, +process.env.A8LIVES); }
   if (a === SEED2HI && phase === "game") {
     iter++; console.log("ITER " + frame + " " + iter);
     for (const [k, d] of (inputs[iter] || [])) key(k, d);
@@ -175,8 +189,10 @@ memory.write = function (a, w, s) {
   }
   if (a === PLAY) {
     const was = memory.read(PLAY, false);
-    if (w === 1 && was === 0) console.log("TUNE " + frame + " " + memory.read(L.msx_tunenum, false));
-    else if (w === 0 && was !== 0) console.log("TEND " + frame);
+    if (w === 1 && was === 0) { console.log("TUNE " + frame + " " + memory.read(L.msx_tunenum, false));
+      if (phase === "game" && stopAt < 0 && process.env.A8STOPTUNE) stopAt = frame + 2; }
+    else if (w === 0 && was !== 0) { console.log("TEND " + frame);
+      if (pzState === 3) { pzState = 4; pzFrame = frame; } }
   }
   // ЗАПУСК эффекта отличается от тика по ПОРЯДКУ записей в дескриптор: msx_sfx_start пишет
   // +0,+1,+2,+3 подряд, а тик эффекта 9 переписывает указатель как +3, потом +2. Без этого
@@ -220,7 +236,12 @@ const LIMIT = process.env.A8MENU ? N : N;   // A8MENU: N = кадров, ина�
 while (steps < 6e8) {
   if (process.env.A8MENU ? frame >= LIMIT : iter - startIter >= LIMIT) break;
   // A8_IRQDROP=1 — модель железа: прерывание Вектора не защёлкивается, кадр под di теряется.
+  if (stopAt >= 0 && frame >= stopAt) break;
   if (frc >= 59904) { frc -= 59904; endFrame(); frame++; if (!cpu.iff) lost++;
+    // A8PAUSE: ВК держим 24 кадра после взятия паузы, отпускаем; через 24 — снова (снять), через 8 отпустить
+    if (pzState === 2 && frame - pzFrame === 24) { key("vk", false); pzState = 3; }
+    else if (pzState === 4 && frame - pzFrame === 24) { key("vk", true); pzState = 5; }   // pzFrame = TEND «блипа»
+    else if (pzState === 5 && frame - pzFrame === 32) { key("vk", false); pzState = 6; }
     if (!(IRQDROP && !cpu.iff)) { v06c.irq = true; v06c.checkInterrupt(); } }
   const pc = cpu.pc;
   if (pc === FOFF) {
@@ -238,10 +259,21 @@ while (steps < 6e8) {
     console.log("VE " + frame + " " + eff[1] + " " + eff[2] + " " + (tctl[1] - vfC[0]) + " " + (tld[1] - vfC[1]) +
                 " " + (tctl[2] - vfC[2]) + " " + (tld[2] - vfC[3]));
     vfRet = -1;
+    // A8PAUSE: ВК — сразу за сливом, оставившим ноту (audio_CE22 идёт следом за msx_frame_off);
+    // матрицу vec_kbmat заполняет ISR, поэтому ВК кладём и туда — иначе пауза встала бы на
+    // итерацию позже, уже после тихого слива
+    if (PAUSEIT && pzState === 0 && iter - startIter >= PAUSEIT && (eff[1] || eff[2])) {
+      key("vk", true); poke(L.vec_kbmat, memory.read(L.vec_kbmat, false) | 0x04); pzState = 1; }
   }
   else if (pc === TICK) console.log("TK " + frame);
   else if (pc === SINIT) console.log("INIT " + frame);
   else if (pc === LADDER) console.log("LAD " + frame);
+  else if (pc === GLOOP) console.log("GL " + frame + " " + memory.read(ROOM, false));
+  else if (pc === GOVER) console.log("GO " + frame);
+  else if (pc === PZREL && pzArm) {      // один раз на паузу: витки ожидания и возвраты из ISR
+    pzArm = false;                        //  на ту же метку не считаются; взвод — на «блипе»
+    console.log("PZ " + frame); if (pzState === 1) { pzState = 2; pzFrame = frame; } }
+  else if (pc === L.audio_msx_blip) pzArm = true;
   const c = (cpu.instruction(), cpu.vcycles);
   steps++; frc += c; tacc += c;
   if (tacc > 1) { const tn = tacc >> 1; tacc -= tn * 2; timer.Count(tn); }
