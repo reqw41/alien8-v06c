@@ -1,21 +1,31 @@
 #!/usr/bin/env node
-// Журнал записей в AY на Векторе: headless vector06js, перехват портов 0x15 (номер регистра)
-// и 0x14 (данные). Кадр считается по RST7 (59904 такта).
+// Журнал звука Вектора: headless vector06js, тапы портов ВИ53 (0x08 управление, 0x0B счётчик 0,
+// 0x0A счётчик 1, 0x09 счётчик 2 — порты ПЕРЕСТАВЛЕНЫ). Кадр считается по RST7 (59904 такта).
+// Эффекты MSX пишут регистры AY в зеркало, раз в итерацию msx_frame_off сливает его в счётчики
+// 1,2 (рецепт Knight Lore); мелодии пишет в те же счётчики плеер msx_tv.
 //
 //   node tools/aytrace_vec.js build/alien8_vec.r0m build/alien8_vec.sld <итераций> [inputs.txt]
 //
 // Переменные окружения:
 //   A8ROOM=<n>   подменить комнату при входе (как в остальных гейтах)
-//   A8MENU=1     НЕ пропускать меню (нужно для мелодии меню и «блипа»)
+//   A8MENU=1     НЕ пропускать меню (нужно для мелодии меню и «блипа»); N = кадров
 //   A8SFX=id:слот:тиков:hi:lo   принудительно запустить эффект на итерации A8SFXIT (по умолчанию 10):
 //                записывается тот же дескриптор слота, что кладёт msx_sfx_start. Нужно для
 //                эффектов 1, 2, 9: сценарий ходьбы до них не доходит, а проверить их надо.
+//                Запуск — в момент записи seed_2 (после объектного цикла итерации A8SFXIT, до
+//                её слива): первые тики эффект получит в объектном цикле СЛЕДУЮЩЕЙ итерации.
 //
 // Формат вывода (строки, которые читает tools/aycheck.py):
-//   W <кадр> <регистр> <значение>              — запись в регистр AY
-//   TUNE <кадр> <смещение потока канала 2>     — начало мелодии (msx_play 0 -> 1)
-//   SFX <кадр> <слот> <id> <тиков> <hi> <lo>   — запуск эффекта (заполнен дескриптор слота)
-//   ITER <кадр> <номер итерации>
+//   V <кадр> <счётчик> <делитель>   — эффективный делитель счётчика 1/2 на конец кадра (0 = стоит);
+//                                     печатается на каждом кадре. Семантика как applyTaps в
+//                                     c64tune_vec.js: управляющее слово БЕЗ делителя = тишина,
+//                                     делитель грузится LSB, затем MSB
+//   P <кадр> <счётчик> <упр> <загр> — за кадр: управляющих слов и загрузок делителя (только ненулевые)
+//   FL <кадр>                       — вход в msx_frame_off (слив зеркала; во время мелодии — пустой)
+//   TUNE <кадр> <номер мелодии>     — начало мелодии (msx_play 0 -> 1), номер из msx_tunenum
+//   TEND <кадр>                     — конец мелодии (msx_play 1 -> 0)
+//   SFX <кадр> <слот> <id> <тиков> <hi> <lo> <stepc> <x> <y> — запуск эффекта (заполнен дескриптор)
+//   ITER <кадр> <номер итерации>    — запись seed_2 (конец объектного цикла итерации)
 "use strict";
 const fs = require("fs"), vm = require("vm");
 const base = "/Users/boris/projects/vector06js";
@@ -27,7 +37,7 @@ for (const l of fs.readFileSync(SLD, "latin1").split("\n")) {
   const p = l.split("|");
   if (p.length >= 8 && p[6] === "L") { const n = p[7].split(",")[1]; if (n && !(n in L)) L[n] = +p[5]; }
 }
-for (const need of ["msx_play", "msx_sfx", "msx_ch", "msx_stream", "seed_2", "curr_room_attrib"])
+for (const need of ["msx_play", "msx_sfx", "msx_tunenum", "msx_frame_off", "seed_2", "curr_room_attrib"])
   if (L[need] === undefined) { console.log("нет метки " + need + " — сборка без звука?"); process.exit(2); }
 const SEED2HI = L.seed_2 + 1, ROOM = L.curr_room_attrib, VKBD = L.vkbd;
 const lst = fs.readFileSync(ROM.replace(/\.r0m$/, ".lst"), "latin1").split("\n");
@@ -81,19 +91,35 @@ if (INPUTS && fs.existsSync(INPUTS)) for (const l of fs.readFileSync(INPUTS, "ut
   if (m) (inputs[+m[1] + LAG] = inputs[+m[1] + LAG] || []).push([m[2].toLowerCase(), m[3].toLowerCase() === "down"]);
 }
 
-// ---------------- перехват записей в AY ----------------
-let frame = 0, reg = -1, nw = 0;
+// ---------------- тапы ВИ53 ----------------
+// eff[c] — делитель, который счётчик c считает после всех записей (0 = стоит); rx/pend — байтовый
+// автомат LSB/MSB; nctl/nld — управляющих слов и загрузок делителя за текущий кадр.
+let frame = 0, nv = 0;
+const eff = [0, 0, 0], rx = [0, 0, 0], pend = [0, 0, 0], nctl = [0, 0, 0], nld = [0, 0, 0];
 const oout = io.output.bind(io);
-const ALL = process.env.A8TRACE === "all";
-let logging = true;
 io.output = function (port, w) {
-  if (port === 0x15) reg = w & 0x0F;
-  else if (port === 0x14) { if (logging && reg >= 0) { console.log("W " + frame + " " + reg + " " + (w & 0xFF)); nw++; } }
+  const p = port & 0xFF, v = w & 0xFF;
+  if (p === 0x08) {
+    const c = v >> 6;
+    if (c < 3 && (v & 0x30) !== 0) { eff[c] = 0; rx[c] = 0; pend[c] = 0; nctl[c]++; }  // без делителя = стоп
+  } else if (p >= 0x09 && p <= 0x0B) {
+    const c = 0x0B - p;
+    if (rx[c] === 0) { pend[c] = v; rx[c] = 1; }
+    else { eff[c] = ((v << 8) | pend[c]) & 0xFFFF; rx[c] = 0; nld[c]++; }
+  }
   return oout(port, w);
 };
+function endFrame() {             // итог кадра `frame` (вызывать ДО frame++)
+  for (let c = 1; c <= 2; c++) {
+    console.log("V " + frame + " " + c + " " + eff[c]); nv++;
+    if (nctl[c] || nld[c]) console.log("P " + frame + " " + c + " " + nctl[c] + " " + nld[c]);
+    nctl[c] = 0; nld[c] = 0;
+  }
+  nctl[0] = 0; nld[0] = 0;
+}
 
 // ---------------- события драйвера ----------------
-const T = L.graphic_objs_tbl, SFX = L.msx_sfx, CH = L.msx_ch, STREAM = L.msx_stream, PLAY = L.msx_play;
+const T = L.graphic_objs_tbl, SFX = L.msx_sfx, PLAY = L.msx_play, FOFF = L.msx_frame_off;
 let phase = process.env.A8MENU ? "menuplay" : "menu", iter = 0, startIter = 0, startseq = null;
 // A8SFX: hi:lo можно задать именем списка эффекта 9 — "e9a" / "e9b" (адрес берётся из .sld)
 const FSFX = process.env.A8SFX ? (function (p) {
@@ -127,9 +153,10 @@ memory.write = function (a, w, s) {
                   memory.read(L.msx_stepc, false) + " " + memory.read(T + 1, false) + " " + memory.read(T + 2, false));
     }
   }
-  if (a === PLAY && w === 1) {
-    const p = memory.read(CH + 14, false) | (memory.read(CH + 15, false) << 8);
-    console.log("TUNE " + frame + " " + (p - STREAM));
+  if (a === PLAY) {
+    const was = memory.read(PLAY, false);
+    if (w === 1 && was === 0) console.log("TUNE " + frame + " " + memory.read(L.msx_tunenum, false));
+    else if (w === 0 && was !== 0) console.log("TEND " + frame);
   }
   // ЗАПУСК эффекта отличается от тика по ПОРЯДКУ записей в дескриптор: msx_sfx_start пишет
   // +0,+1,+2,+3 подряд, а тик эффекта 9 переписывает указатель как +3, потом +2. Без этого
@@ -161,10 +188,10 @@ memory.write = function (a, w, s) {
 
 // Кадр считается и здесь: мелодия старта играет ДО входа в комнату, а oneInterrupt —
 // это ровно один кадр Вектора.
-for (let f = 0; f < 60; f++) { v06c.oneInterrupt(true); frame++; }
+for (let f = 0; f < 60; f++) { v06c.oneInterrupt(true); endFrame(); frame++; }
 if (!process.env.A8MENU) {
   key("0", true);
-  let guard = 0; while (phase !== "game" && guard++ < 4000) { v06c.oneInterrupt(true); frame++; }
+  let guard = 0; while (phase !== "game" && guard++ < 4000) { v06c.oneInterrupt(true); endFrame(); frame++; }
   if (phase !== "game") { console.log("не дошли до комнаты"); process.exit(2); }
 }
 startIter = iter; let frc = 0, tacc = 0, steps = 0, lost = 0;
@@ -173,13 +200,15 @@ const LIMIT = process.env.A8MENU ? N : N;   // A8MENU: N = кадров, ина�
 while (steps < 6e8) {
   if (process.env.A8MENU ? frame >= LIMIT : iter - startIter >= LIMIT) break;
   // A8_IRQDROP=1 — модель железа: прерывание Вектора не защёлкивается, кадр под di теряется.
-  if (frc >= 59904) { frc -= 59904; frame++; if (!cpu.iff) lost++;
+  if (frc >= 59904) { frc -= 59904; endFrame(); frame++; if (!cpu.iff) lost++;
     if (!(IRQDROP && !cpu.iff)) { v06c.irq = true; v06c.checkInterrupt(); } }
+  if (cpu.pc === FOFF) console.log("FL " + frame);
   const c = (cpu.instruction(), cpu.vcycles);
   steps++; frc += c; tacc += c;
   if (tacc > 1) { const tn = tacc >> 1; tacc -= tn * 2; timer.Count(tn); }
   if (cpu.last_opcode === 0xd3) io.commit();
 }
-console.log("# записей " + nw + ", кадров " + frame + ", итераций " + (iter - startIter)
+endFrame();
+console.log("# V-строк " + nv + ", кадров " + frame + ", итераций " + (iter - startIter)
   + ", потеряно кадров (обратный ход на di) " + lost);
-process.exit(nw ? 0 : 1);
+process.exit(nv ? 0 : 1);
