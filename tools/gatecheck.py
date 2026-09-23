@@ -308,6 +308,14 @@ MUTS = [
          file="tools/a8_vec.py",
          old="A8_SP_RESV = 0x100      # буфер под стеком.",
          new="A8_SP_RESV = 0x20       # ПОРЧА: буфер под стеком."),
+    dict(name="ladder", gate="recolour",
+         why="лесенка audio_msx_ladder снова не бережёт DE (`push de` -> `push hl`: на выходе "
+             "DE := HL входа): счётчик D перекраски loc_B005 (вентиль на гнезде криокамеры) "
+             "портится, 16 ступеней мигания не выходят. Сценарии стенда этот путь не достают — "
+             "ни локстеп, ни zxpix, ни гейты гибели его не видят",
+         file="tools/a8_sound_ay.py",
+         old="        push de\n        xor a\n        ld (msx_si), a                          ; слот 0 -> канал A\n",
+         new="        push hl\n        xor a\n        ld (msx_si), a                          ; слот 0 -> канал A\n"),
     dict(name="sfx", gate="aycheck",
          why="период шума эффекта 1 маскируется 0x3F вместо 0x1F: R6 расходится с моделью MSX",
          file="tools/a8_sound_ay.py",
