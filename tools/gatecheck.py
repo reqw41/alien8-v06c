@@ -341,6 +341,20 @@ MUTS = [
          old="\t\t\t\tld\t\ta, 7\n\t\t\t\tcall\tvec_set_pal\t\t\t; белая палитра (меню)\n",
          new="\t\t\t\tld\t\ta, 7\n\t\t\t\tld\t\t(0x7F00), a\t\t; ПОРЧА: чужая запись в зону 3\n"
              "\t\t\t\tcall\tvec_set_pal\t\t\t; белая палитра (меню)\n"),
+    dict(name="unpackbyte", gate="unpack",
+         why="итоговый релиз: один бит одного байта потока L (смещение 5000) инвертирован при сборке "
+             "образа — модель упаковщика видит чистый поток и пропускает; распаковка на Векторе даёт "
+             "не образ эталона (или игра не доходит до START)",
+         file="tools/a8_pack.py",
+         old="    s.append(_db(cl))\n",
+         new="    s.append(_db(cl[:5000] + bytes([cl[5000] ^ 0x01]) + cl[5001:]))   # ПОРЧА\n"),
+    dict(name="unpackdelta", gate="unpack",
+         why="поток L лёг на 4 байта ниже запаса delta и модель in-place упаковщика отключена: "
+             "распаковщик на месте пишет в ещё не прочитанный байт потока — стенд ловит чтение "
+             "затёртого и расхождение с эталоном",
+         file="tools/a8_pack.py",
+         old='    shift = int(os.environ.get("A8_PACK_SHIFT", "0"))   # ТОЛЬКО для негативного контроля\n',
+         new='    shift = 4; os.environ["A8_PACK_NOCHECK"] = "1"   # ПОРЧА\n'),
     dict(name="roomsilence", gate="aycheck",
          why="снято глушение ВИ53 на входе в game_loop: на смене комнаты счётчик держит последний "
              "делитель всю отрисовку новой комнаты (~38 кадров) — дефект с железа",
@@ -494,6 +508,16 @@ def gate_result(gate, env=None):
             return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
         r = run(["node", "tools/splashzone_vec.js", "build/alien8_release.r0m",
                  "build/alien8_release.sld"], env)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
+    if gate == "unpack":
+        # ИТОГОВЫЙ РЕЛИЗ (tools/a8_pack.py): распаковка на месте без чтения затёртого; к
+        # spl_unpacked память == эталон (плоскость 0 — нули); к START — то же, кроме ячеек
+        # ISR/vec_set_pal (те же, что пишет эталон до START); плоскость 2 чиста; 0xF100..0xFFFF
+        # после START сначала пишутся, потом читаются
+        b = build("release", env)
+        if b.returncode:
+            return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
+        r = run(["node", "tools/unpack_vec.js"], env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "spcheck":
         # ГЛУБИНА СТЕКА против зарезервированного под ним буфера (стенд берёт его размер
