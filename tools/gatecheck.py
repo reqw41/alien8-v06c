@@ -355,6 +355,12 @@ MUTS = [
          file="tools/a8_pack.py",
          old='    shift = int(os.environ.get("A8_PACK_SHIFT", "0"))   # ТОЛЬКО для негативного контроля\n',
          new='    shift = 4; os.environ["A8_PACK_NOCHECK"] = "1"   # ПОРЧА\n'),
+    dict(name="c64tick", gate="c64tune",
+         why="итоговый релиз: тик мелодии заставки шагает по записям голосов на 40 вместо 41 — "
+             "голоса B и C читают чужое состояние; картинка, распаковка и игра целы",
+         file="tools/a8_pack.py",
+         old="\t\t\t\tadd\t\ta, 41\n",
+         new="\t\t\t\tadd\t\ta, 40\t\t; ПОРЧА\n"),
     dict(name="roomsilence", gate="aycheck",
          why="снято глушение ВИ53 на входе в game_loop: на смене комнаты счётчик держит последний "
              "делитель всю отрисовку новой комнаты (~38 кадров) — дефект с железа",
@@ -508,6 +514,14 @@ def gate_result(gate, env=None):
             return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
         r = run(["node", "tools/splashzone_vec.js", "build/alien8_release.r0m",
                  "build/alien8_release.sld"], env)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
+    if gate == "c64tune":
+        # МЕЛОДИЯ C64 НА ЗАСТАВКЕ ИТОГОВОГО РЕЛИЗА: 8527 кадров x 3 счётчика ВИ53 против decode()
+        # tools/a8_tune_c64.py; «0» -> PC в START (~124 кадра: распаковка) и таблицы на 0xF100
+        b = build("release", env)
+        if b.returncode:
+            return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
+        r = run(["node", "tools/c64tune_vec.js", "build/alien8_release.r0m"], env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "unpack":
         # ИТОГОВЫЙ РЕЛИЗ (tools/a8_pack.py): распаковка на месте без чтения затёртого; к

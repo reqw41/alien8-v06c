@@ -1,9 +1,13 @@
-// c64tune_vec.js — гейт мелодии C64 на релизной заставке (build/alien8_release.r0m, A8_SPLASH=1).
+// c64tune_vec.js — гейт мелодии C64 на релизной заставке (итоговый build/alien8_release.r0m —
+// 16-цветная заставка, игра сжата, tools/a8_pack.py; годится и для эталона alien8_release_ref.r0m).
 // Тап на out 0x08/0x0B/0x0A/0x09: по кадрам восстанавливаем эффективный делитель каждого
 // счётчика ВИ53 и сравниваем с эталоном decode() из tools/a8_tune_c64.py (8427 кадров цикла
 // + 100 кадров зацикливания = 8527). Семантика Вектора: управляющее слово БЕЗ делителя
 // (0x36/0x76/0xB6) останавливает счётчик = тишина; запись LSB+MSB загружает делитель.
-// Затем: клавиша -> игра стартует (jp START, build_lookup_tbls затирает данные мелодии).
+// Затем: клавиша -> игра стартует: кадр, где PC впервые = START (метка G_START итогового релиза
+// или START эталона — из .sld рядом с образом), и build_lookup_tbls переписал 0xF100.
+// КАДР ВХОДА В ИГРУ у итогового релиза ~124 после клавиши (было 14 у несжатого): между клавишей
+// и START — распаковка игры (заливка плоскостей, потоки H/P3, поток L на месте).
 // Расхождений 0 -> PASS. Образцы: kbcheck_vec.js, tunecheck_vec.js.
 const fs = require("fs"), vm = require("vm"), cp = require("child_process");
 const base = "/Users/boris/projects/vector06js";
@@ -35,6 +39,15 @@ if (IMG[0] !== 0xF3 || IMG[1] !== 0x31) throw new Error("загрузчик не
 const SPBASE = IMG[2] | (IMG[3] << 8);
 memory.init_from_array(IMG, 0); memory.detach_boot && memory.detach_boot();
 const rd = a => memory.bytes[memory.tobank(a & 0xffff)];
+let START = -1;
+{ const sld = ROM.replace(/\.r0m$/, ".sld");
+  for (const l of fs.readFileSync(sld, "latin1").split("\n")) {
+    const p = l.split("|");
+    if (p.length >= 8 && p[6] === "L") { const n = p[7].split(",")[1]; if ((n === "G_START" || n === "START") && START < 0) START = +p[5]; }
+  }
+  if (START < 0) throw new Error("нет метки G_START/START в " + sld); }
+let atStart = -1, fcount = 0;
+v06c.check_breakpoint = () => { if (cpu.pc === START && atStart < 0) atStart = fcount; return false; };
 cpu.pc = 0; cpu.sp = SPBASE; cpu.iff = false;
 
 // тап на out: пишем (порт, значение) в порядке исполнения
@@ -125,14 +138,16 @@ keyboard.matrix[2] |= 0x01;               // «0» — старт (как в tun
 let started = -1;
 for (let f = 0; f < 400; f++) {
   if (f === 6) keyboard.matrix[2] &= ~0x01; // отпускаем
+  fcount = f;
   v06c.oneInterrupt(true);
-  if (started < 0) {
+  if (started < 0 && atStart >= 0) {
     let diff = false;
     for (let a = 0; a < 16; a++) if (rd(0xF100 + a) !== sig[a]) { diff = true; break; }
-    if (diff) started = f;
+    if (diff) started = atStart;
   }
 }
-if (started < 0) { console.log("FAIL: через 400 кадров после «0» не стартовала игра (0xF100 не перезаписан таблицами)"); process.exit(1); }
+if (atStart < 0) { console.log("FAIL: через 400 кадров после «0» PC так и не пришёл в START"); process.exit(1); }
+if (started < 0) { console.log("FAIL: START был, но 0xF100 не перезаписан таблицами build_lookup_tbls"); process.exit(1); }
 if (cpu.pc >= 0xF100) { console.log(`FAIL: после старта pc=0x${cpu.pc.toString(16)} застрял в регионе мелодии`); process.exit(1); }
 for (let f = 0; f < 100; f++) v06c.oneInterrupt(true);   // игра работает (меню), без краша
 console.log(`PASS: мелодия C64 ${NREF} кадров × 3 счётчика без расхождений (иниц. кадр ${F0}); ` +
