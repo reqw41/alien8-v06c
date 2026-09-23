@@ -365,6 +365,22 @@ MUTS = [
          file="tools/a8_pack.py",
          old="\t\t\t\tld\t\thl, spl_pal + 15\n",
          new="\t\t\t\tld\t\thl, spl_pal + 14\t; ПОРЧА\n"),
+    dict(name="unpackp2", gate="unpack",
+         why="итоговый релиз: стековая заливка ступени 2 кроет 0x8000..0xBFFF вместо 0x8000..0xDFFF — "
+             "картинка заставки остаётся в плоскости 2 (селектор белого HUD) к START; сторож "
+             "a8_regions для итогового релиза плоскость 2 пропускает (там картинка на время "
+             "заставки) — ловит проверка чистоты плоскости 2 к START в стенде распаковки",
+         file="tools/a8_pack.py",
+         old="\t\t\t\tld\t\thl, 0xE000\t\t\t; заливка, 2 Б за push (под di, стек — ниже в SP)\n"
+             "\t\t\t\tld\t\tsp, hl\n\t\t\t\tld\t\tbc, 0x0300",
+         new="\t\t\t\tld\t\thl, 0xC000\t; ПОРЧА\n"
+             "\t\t\t\tld\t\tsp, hl\n\t\t\t\tld\t\tbc, 0x0200"),
+    dict(name="splashroom", gate="regions",
+         why="итоговый релиз: стек заставки раздут до 7000 Б — код, мелодия, потоки H/P3 и стек "
+             "налезают на поток L; новая строка регионов (ASSERT под потоком L) обязана покраснеть",
+         file="tools/a8_pack.py",
+         old='spl_stack:\\t\\tDS\\t\\t128',
+         new='spl_stack:\\t\\tDS\\t\\t7000'),
     dict(name="roomsilence", gate="aycheck",
          why="снято глушение ВИ53 на входе в game_loop: на смене комнаты счётчик держит последний "
              "делитель всю отрисовку новой комнаты (~38 кадров) — дефект с железа",
@@ -508,7 +524,7 @@ def gate_result(gate, env=None):
         if b.returncode:
             return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
         r = run(["python3", "tools/a8_regions.py", "build/alien8_vec.lst",
-                 "build/alien8_release.lst"], env)
+                 "build/alien8_release_ref.lst", "build/alien8_release.lst"], env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "splashzone":
         # ИТОГОВЫЙ РЕЛИЗ: до клавиши исполняется только код заставки (игра сжата) — писать он

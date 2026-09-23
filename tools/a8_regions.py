@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Свободное место в регионах раскладки: адрес на каждом ASSERT $ <= N из листинга.
    python3 tools/a8_regions.py [листинг ...] [--holes]
-   (без листингов — build/alien8_vec.lst и, если собран, build/alien8_release.lst; код 1 при переборе)
+   (без листингов — build/alien8_vec.lst и, если собраны, эталон релиза build/alien8_release_ref.lst
+    и итоговый релиз build/alien8_release.lst; код 1 при переборе)
 
 Дыры вне картинки (строки 224..255/0..31 столбцов плоскости 1) — это 33 отдельных ASSERT'а,
 по одному на дыру; в общей таблице они сворачиваются в ОДНУ строку-регион «дыры вне картинки».
@@ -53,6 +54,14 @@ def check(lst):
                   (name, hused[pl], hsz[pl], hn[pl], hsz[pl] - hused[pl]))
 
     # ---- ГЕЙТ: в плоскости 2 ни кода, ни данных ----
+    # ИСКЛЮЧЕНИЕ — итоговый релиз (tools/a8_pack.py, метка spl_plane2): на время заставки
+    # плоскость 2 — картинка 16 цветов, игра в ней не лежит (сжата). Раскладку игры судит
+    # листинг эталона build/alien8_release_ref.lst (строками выше и этим же гейтом), а то,
+    # что к START плоскость 2 чиста, — tools/unpack_vec.js по памяти эмулятора.
+    if any(re.search(r'\bspl_plane2:', l) for l in lines):
+        print("КАРТИНКА ПЛОСКОСТИ 2: итоговый релиз — на заставке там картинка (исключение); к START "
+              "чистоту проверяет tools/unpack_vec.js, игру — листинг эталона alien8_release_ref.lst")
+        return over
     LO, HI = (int(x, 16) for x in os.environ.get('A8_P2', 'C000-DFFF').split('-'))
     PIC_LO, PIC_HI = (int(x, 16) for x in os.environ.get('A8_P2_PIC', '20-DF').split('-'))
     # ЛОВУШКА ЛИСТИНГА: колонка байт обрезана («00 00 00...» у `DS 1664`, у длинных DB — тоже),
@@ -95,7 +104,8 @@ def check(lst):
     return over
 
 
-# Без аргументов — ОБЕ цели: vec и релизная (A8_SPLASH=1, build/alien8_release.lst), каждая
+# Без аргументов — ВСЕ цели: vec, эталон релиза (A8_SPLASH=1, build/alien8_release_ref.lst) и
+# итоговый релиз (tools/a8_pack.py, build/alien8_release.lst — зоны заставки), каждая
 # отдельным блоком строк. Релиз кладёт свой код в нижний регион и в зоны заставки, поэтому
 # перебор у него свой: 2026-09-23 релиз не собирался (нижний регион 0x78F6 > 0x7700), а
 # регионы смотрели только vec — и перебора никто не видел. Код возврата 1 — если хоть у
@@ -103,8 +113,9 @@ def check(lst):
 args = [a for a in sys.argv[1:] if not a.startswith('-')]
 if not args:
     args = ['build/alien8_vec.lst']
-    if os.path.exists('build/alien8_release.lst'):
-        args.append('build/alien8_release.lst')
+    for extra in ('build/alien8_release_ref.lst', 'build/alien8_release.lst'):
+        if os.path.exists(extra):
+            args.append(extra)
 rc = 0
 for lst in args:
     if len(args) > 1:

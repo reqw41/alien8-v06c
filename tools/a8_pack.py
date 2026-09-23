@@ -691,6 +691,7 @@ spl_s2_hc:		ld		a, (hl)
     s.append(DZX0)
     s.append("""\
 spl_s2_end:
+        ASSERT $ <= 0x10000   ; заставка: ступень 2 (исполняется с 0xFE00) до конца памяти
 				ENT
         ASSERT spl_s2_end <= 0x10000   ; ступень 2 в страницах таблиц build_lookup_tbls
         ASSERT SPL_STAGE2 - 0x40 >= 0x%(X1)04X   ; стек ступени 2 (до 64 Б: vec_isr + vec_set_pal) — тоже там
@@ -721,13 +722,13 @@ spl_tune:
     s.append(_db(cp))
     s.append("spl_streams_end:\n")
     s.append("spl_stack:\t\tDS\t\t128\t\t\t; стек заставки (ISR 8 Б + плеер)\nspl_stack_top:\n")
-    s.append("        ASSERT $ <= spl_L   ; код, мелодия, потоки H/P3 и стек заставки — под потоком L\n")
+    s.append("        ASSERT $ <= 0x%04X   ; заставка: код, мелодия, потоки H/P3, стек — под потоком L\n" % lay["SPL_L"])
     s.append("\t\t\t\tORG\t\t0x%04X\t\t; поток L: конец на delta=%d выше конца приёмника 0x%04X\n"
              % (lay["SPL_L"], lay["dL"], lay["E_L"]))
     s.append("spl_L:\n")
     s.append(_db(cl))
     s.append("spl_L_end:\n")
-    s.append("        ASSERT spl_L_end <= 0x8000   ; поток L — в нижних 32 КБ (плоскости — картинка)\n")
+    s.append("        ASSERT $ <= 0x8000   ; заставка: поток L под плоскостью 0 (in-place, запас delta)\n")
     s.append("        ASSERT spl_L_end >= SPL_E_L + %d   ; запас delta zx0 для распаковки на месте\n"
              % lay["dL"])
     for p in range(4):
