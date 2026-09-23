@@ -381,6 +381,14 @@ MUTS = [
          file="tools/a8_pack.py",
          old='spl_stack:\\t\\tDS\\t\\t128',
          new='spl_stack:\\t\\tDS\\t\\t7000'),
+    dict(name="bootpal", gate="tracecmp",
+         why="итоговый релиз: хвост ступени 2 не зовёт vec_set_pal 7 (как vec_boot эталона) — "
+             "распаковка байт в байт та же (гейт unpack зелёный: ячейки палитры просто остаются как "
+             "в образе), но игра стартует с чёрной палитрой вместо белой: ISR грузит в порт 0x0C "
+             "другое, чем у эталона из той же точки",
+         file="tools/a8_pack.py",
+         old="\t\t\t\tcall\tG_VEC_SET_PAL\t\t; белая палитра меню, как vec_boot\n",
+         new="\t\t\t\tor\t\ta\t\t; ПОРЧА\n"),
     dict(name="roomsilence", gate="aycheck",
          why="снято глушение ВИ53 на входе в game_loop: на смене комнаты счётчик держит последний "
              "делитель всю отрисовку новой комнаты (~38 кадров) — дефект с железа",
@@ -551,6 +559,15 @@ def gate_result(gate, env=None):
         if b.returncode:
             return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
         r = run(["node", "tools/splashpix_vec.js", "build/alien8_release.r0m"], env)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
+    if gate == "tracecmp":
+        # ПОСЛЕ START — КАК ЭТАЛОН: эталон из своей точки START дважды, во втором память
+        # подменена памятью итогового релиза в его START; 1500 кадров (меню, новая игра, ходьба):
+        # выводы во все порты и регистры каждый кадр равны, разница памяти мертва до перезаписи
+        b = build("release", env)
+        if b.returncode:
+            return b.returncode, "release: " + (b.stdout + b.stderr)[-400:]
+        r = run(["node", "tools/tracecmp_vec.js"], env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "unpack":
         # ИТОГОВЫЙ РЕЛИЗ (tools/a8_pack.py): распаковка на месте без чтения затёртого; к
