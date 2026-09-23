@@ -25,7 +25,14 @@
 //   TUNE <кадр> <номер мелодии>     — начало мелодии (msx_play 0 -> 1), номер из msx_tunenum
 //   TEND <кадр>                     — конец мелодии (msx_play 1 -> 0)
 //   SFX <кадр> <слот> <id> <тиков> <hi> <lo> <stepc> <x> <y> — запуск эффекта (заполнен дескриптор)
+//   SFXI <кадр> <слот> <id> <тиков> <hi> <lo> <stepc> <x> <y> — то же для A8SFX (дескриптор пишет
+//                                     стенд, msx_sfx_start и его msx_vhnew не зовутся)
 //   ITER <кадр> <номер итерации>    — запись seed_2 (конец объектного цикла итерации)
+//   TK <кадр>                       — вызов msx_sfx_tick (тик движка эффектов; положение запусков
+//                                     среди тиков = фаза эффекта; число тиков за итерацию сверяет
+//                                     aycheck.py с моделью: 56)
+//   INIT <кадр>                     — вызов msx_snd_init (слоты, тень R7, отложенные ноты сброшены)
+//   LAD <кадр>                      — вызов audio_msx_ladder (лесенка пишет зеркало мимо движка)
 "use strict";
 const fs = require("fs"), vm = require("vm");
 const base = "/Users/boris/projects/vector06js";
@@ -37,7 +44,8 @@ for (const l of fs.readFileSync(SLD, "latin1").split("\n")) {
   const p = l.split("|");
   if (p.length >= 8 && p[6] === "L") { const n = p[7].split(",")[1]; if (n && !(n in L)) L[n] = +p[5]; }
 }
-for (const need of ["msx_play", "msx_sfx", "msx_tunenum", "msx_frame_off", "seed_2", "curr_room_attrib"])
+for (const need of ["msx_play", "msx_sfx", "msx_tunenum", "msx_frame_off", "msx_sfx_tick", "msx_snd_init",
+                    "audio_msx_ladder", "seed_2", "curr_room_attrib"])
   if (L[need] === undefined) { console.log("нет метки " + need + " — сборка без звука?"); process.exit(2); }
 const SEED2HI = L.seed_2 + 1, ROOM = L.curr_room_attrib, VKBD = L.vkbd;
 const lst = fs.readFileSync(ROM.replace(/\.r0m$/, ".lst"), "latin1").split("\n");
@@ -119,7 +127,8 @@ function endFrame() {             // итог кадра `frame` (вызыват
 }
 
 // ---------------- события драйвера ----------------
-const T = L.graphic_objs_tbl, SFX = L.msx_sfx, PLAY = L.msx_play, FOFF = L.msx_frame_off;
+const T = L.graphic_objs_tbl, SFX = L.msx_sfx, PLAY = L.msx_play, FOFF = L.msx_frame_off,
+      TICK = L.msx_sfx_tick, SINIT = L.msx_snd_init, LADDER = L.audio_msx_ladder;
 let phase = process.env.A8MENU ? "menuplay" : "menu", iter = 0, startIter = 0, startseq = null;
 // A8SFX: hi:lo можно задать именем списка эффекта 9 — "e9a" / "e9b" (адрес берётся из .sld)
 const FSFX = process.env.A8SFX ? (function (p) {
@@ -149,7 +158,7 @@ memory.write = function (a, w, s) {
       if (id === 9) { const a16 = hi | (lo << 8);
         const m = a16 === L.msx_e9a ? 0x456F : a16 === L.msx_e9b ? 0x457A : 0;
         if (m) { h2 = m & 0xFF; l2 = m >> 8; } }
-      console.log("SFX " + frame + " " + sl + " " + id + " " + tk + " " + h2 + " " + l2 + " " +
+      console.log("SFXI " + frame + " " + sl + " " + id + " " + tk + " " + h2 + " " + l2 + " " +
                   memory.read(L.msx_stepc, false) + " " + memory.read(T + 1, false) + " " + memory.read(T + 2, false));
     }
   }
@@ -202,7 +211,11 @@ while (steps < 6e8) {
   // A8_IRQDROP=1 — модель железа: прерывание Вектора не защёлкивается, кадр под di теряется.
   if (frc >= 59904) { frc -= 59904; endFrame(); frame++; if (!cpu.iff) lost++;
     if (!(IRQDROP && !cpu.iff)) { v06c.irq = true; v06c.checkInterrupt(); } }
-  if (cpu.pc === FOFF) console.log("FL " + frame);
+  const pc = cpu.pc;
+  if (pc === FOFF) console.log("FL " + frame);
+  else if (pc === TICK) console.log("TK " + frame);
+  else if (pc === SINIT) console.log("INIT " + frame);
+  else if (pc === LADDER) console.log("LAD " + frame);
   const c = (cpu.instruction(), cpu.vcycles);
   steps++; frc += c; tacc += c;
   if (tacc > 1) { const tn = tacc >> 1; tacc -= tn * 2; timer.Count(tn); }

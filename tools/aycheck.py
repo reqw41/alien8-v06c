@@ -1,20 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Гейт звука: поканальная сверка журнала записей AY Вектора с моделью MSX.
+"""Гейт звука эффектов на ВИ53: журнал tools/aytrace_vec.js против модели MSX + конверсии слива.
 
-    node tools/aytrace_vec.js build/alien8_vec.r0m build/alien8_vec.sld ... > build/ay.txt
-    python3 tools/aycheck.py build/ay.txt [--frames N]
+    node tools/aytrace_vec.js build/alien8_vec.r0m build/alien8_vec.sld <итераций> > build/ay.txt
+    python3 tools/aycheck.py build/ay.txt
 
-Зачем поканально. У MSX проигрыватель обходит три канала по разу за «проход», а у нас
-каждый канал отматывает свои 114 проходов подряд — ГЛОБАЛЬНЫЙ порядок записей разный,
-а последовательность ВНУТРИ канала обязана совпасть байт в байт. То же у эффектов:
-слот жёстко привязан к каналу (0 -> A, 1 -> B, 2 -> C).
+Эталон строится НЕЗАВИСИМО от кода Вектора:
+  1. регистры AY — модель движка эффектов MSX (~/projects/alien8-research/msx/msx_psg_model.py,
+     класс Sfx: тики, микшер, гашение), по тикам в том порядке, в каком их выполнил Вектор
+     (TK-строки журнала: 56 тиков на итерацию — у MSX тик стоит в цикле по 56 объектам; сколько
+     их вышло на самом деле, тоже сверяется, см. ниже). Положение запуска эффекта среди TK-строк
+     и есть его фаза t0 (0..55) — она наблюдается, а не подбирается: перебор фазы мог бы
+     «спрятать» порчу порога громкости, подобрав фазу, при которой громкость на сливе другая;
+  2. зеркало регистров: всё, что модель пишет в AY, плюс тишина после каждого слива
+     (R7 := 0xBF, R8..R10 := 0; периоды и R6 остаются) и лесенка audio_msx_ladder (LAD-строка:
+     тон канала A в тени R7, восемь ступеней, в конце громкость 0);
+  3. слив раз в итерацию (FL-строка) — конверсия, переписанная с asm (tools/a8_sound_ay.py,
+     msx_vcalc/msx_ay2vi/mvc_off/msx_viwant/msx_viemit, а не с описания):
+       громкость R(8+c) < 6 -> канал молчит (байт целиком: бит огибающей 0x10 даёт >= 16 = полный);
+       ~R7 & (0x09,0x12,0x24)[c] == 0 -> молчит; & 0x07 == 0 (только шум) -> делитель (R6&0x1F, 0->1)*256;
+       тон: P = R(2c) | (R(2c+1)&0x0F)<<8, делитель = 13P + P//2; делитель < 64 -> молчит;
+       отложенная нота msx_vhold (KL §20): гашение слота (msx_sfx_kill) ставит 1 (тон) / 2 (шум,
+       эффект 1), если метка 0; живой голос на сливе ставит 3; молчащий канал на сливе метку
+       обнуляет и, если было 1/2, звучит тоном/шумом по зеркалу (БЕЗ порога громкости);
+       запуск эффекта через msx_sfx_start (SFX-строка) метку слота обнуляет, запуск стендом
+       (SFXI, A8SFX) — нет;
+       раскладка: B -> счётчик 1, C -> 2, A берёт свободный (сперва 2, потом 1), третий отброшен;
+       выдача: управляющее слово только при смене владельца (и при уходе в тишину), делитель —
+       только если отличается от кэша (при смене владельца кэш бьётся).
+Сверка по кадрам: эффективный делитель счётчиков 1,2 на конец кадра (V) и число управляющих
+слов / загрузок делителя за кадр (P). Кадры, в которых играет мелодия (TUNE..TEND), не
+сверяются — мелодии судит tools/tunecheck_vec.js; на TUNE/TEND владельцы сбрасываются, как в
+msx_tv_mute.
 
-Регистр 7 (микшер) общий для трёх каналов, поэтому в поканальную сверку он не входит:
-при двух одновременных эффектах его значение зависит от порядка, которого у MSX и у нас
-быть одинаковым не может. Он проверяется отдельно — по числу записей на эффект.
-
-Код возврата: 0 — расхождений нет; 1 — есть расхождения или выборка пуста.
+Код возврата: 0 — расхождений нет; 1 — есть расхождения или выборка пуста/вакуумна.
 """
 import os
 import sys
@@ -22,195 +41,292 @@ import sys
 sys.path.insert(0, os.path.expanduser('~/projects/alien8-research/msx'))
 import msx_psg_model as M   # noqa: E402
 
-PASSES = 114        # «проходов» MSX за видеокадр (живой замер, SOUND.md §2.4)
-
-# регистр AY -> канал (0 = A, 1 = B, 2 = C); None — общий
-CHAN = {0: 0, 1: 0, 8: 0, 2: 1, 3: 1, 9: 1, 4: 2, 5: 2, 10: 2}
-CHNAME = 'ABC'
-# слот эффекта -> канал AY
-SLOT_CH = {0: 0, 1: 1, 2: 2}
+TICKS = 56                       # тиков движка эффектов за игровую итерацию (MSX: 56 объектов)
+KMASK = (0x09, 0x12, 0x24)       # биты тона и шума канала в R7 (msx_kmask, MSX 0x4402)
+VOL_MIN = 6                      # порог громкости 6/15
+DIV_MIN = 64                     # делитель < 64 — выше 23 кГц, молчит
+FF = 0xFF
 
 
-def parse(path):
-    """Журнал разбирается С СОХРАНЕНИЕМ ПОРЯДКА: у события и у записи одного кадра номер
-    кадра одинаков, поэтому «после метки TUNE» отличается от «в кадре метки» — список
-    инициализации PSG пишется в том же кадре, но ДО метки."""
-    ev, w = [], []
-    for line in open(path, encoding='utf-8'):
-        p = line.split()
-        if not p:
-            continue
-        if p[0] == 'W':
-            w.append((int(p[1]), int(p[2]), int(p[3])))
-        elif p[0] in ('TUNE', 'SFX', 'ITER'):
-            ev.append((p[0], [int(x) for x in p[1:]], len(w)))   # len(w) = позиция в потоке записей
-    return ev, w
+class Sfx(M.Sfx):
+    """Модель MSX + крючок гашения для отложенной ноты (msx_sfx_kill -> msx_vhkill)."""
+
+    def __init__(self, box):
+        super().__init__()
+        self.box = box
+
+    def kill(self, s):
+        sid = self.slot[s][0]
+        super().kill(s)
+        if self.box.vhold[s] == 0:
+            self.box.vhold[s] = 2 if sid == 1 else 1
 
 
-def tune_by_offset(off):
-    """Смещение потока канала 2 в пуле -> имя мелодии."""
-    lo, _hi = M.stream_bounds()
-    for i, nm in enumerate(M.TUNE_NAMES):
-        if M.rw(M.A_HEADERS + 6 * i + 4) - lo == off:
-            return i, nm
-    return None, None
+class Model:
+    def __init__(self):
+        self.vhold = [0, 0, 0]
+        self.e = Sfx(self)
+        self.busy = 0
+        self.regs = [0] * 16
+        self.silence()
+        self.own = [FF, FF, FF]
+        self.cache = [0xFFFF] * 3
+        self.eff = [0, 0, 0]
+        self.nctl = [0, 0, 0]
+        self.nld = [0, 0, 0]
+        self.vdiv = [0, 0, 0]
 
+    def drain(self):
+        for _t, r, v in self.e.log:
+            self.regs[r & 0x0F] = v & 0xFF
+        self.e.log = []
 
-STOP = [(7, 0xBF), (8, 0), (9, 0), (10, 0)]
+    def silence(self):
+        self.regs[7] = 0xBF
+        self.regs[8] = self.regs[9] = self.regs[10] = 0
 
+    def init(self):                      # msx_snd_init
+        self.e.slot = [[0, 0, 0, 0] for _ in range(3)]
+        self.e.mix = 0xBF
+        self.busy = 0
+        self.vhold = [0, 0, 0]
+        self.silence()
+        self.mute()
 
-def strip_stop(writes):
-    out, i, n = [], 0, len(writes)
-    while i < n:
-        if [(r, v) for _f, r, v in writes[i:i + 4]] == STOP:
-            i += 4
-            continue
-        out.append(writes[i])
-        i += 1
-    return out
+    def mute(self):                      # msx_tv_mute: оба счётчика стоят, владельцев нет
+        for c in (1, 2):
+            self.nctl[c] += 1
+            self.own[c] = FF
+            self.eff[c] = 0
 
+    def start(self, slot, sid, ticks, hi, lo, stepc, x, y, vhnew):
+        if vhnew:
+            self.vhold[slot] = 0
+        if sid == 3:
+            self.e.stepc, self.e.plx, self.e.ply = stepc, x, y
+        self.e.start(sid, ticks, hi, lo, slot)
+        self.busy = 1
 
-def split(writes, chan):
-    return [(f, r, v) for f, r, v in writes if CHAN.get(r) == chan]
+    def tick(self):
+        self.e.tick()
+        self.drain()
+        if all(s[0] == 0 for s in self.e.slot):
+            self.busy = 0
 
+    def ladder(self):                    # audio_msx_ladder: мимо движка, прямо в зеркало
+        self.e.mix &= 0xFE
+        self.regs[7] = self.e.mix
+        for b in range(8, 0, -1):
+            self.regs[0] = ((b - 1) << 4) & 0xFF
+            self.regs[1] = 0
+            self.regs[8] = 0x0F
+        self.regs[8] = 0
 
-def check_tune(idx, name, f0, writes, nframes, rep):
-    """Сверка одной мелодии: модель на nframes кадров, поканально."""
-    t = M.Tune(M.A_HEADERS + 6 * idx)
-    t.run(nframes * PASSES)
-    mlog = t.log[len(M.rlist(M.A_INIT)):]        # список инициализации PSG идёт до метки TUNE
-    ours = writes
-    bad = 0
-    for ch in range(3):
-        mc = [(p, r, v) for p, r, v in mlog if CHAN.get(r) == ch]
-        oc = split(ours, ch)
-        n = min(len(mc), len(oc))
-        if n == 0:
-            continue
-        mism = 0
-        tail = 0
-        shift = set()
-        for i in range(n):
-            (p, r, v), (f, r2, v2) = mc[i], oc[i]
-            if (r, v) != (r2, v2):
-                # ХВОСТ ПОСЛЕ END. У MSX END останавливает проигрыватель посреди «прохода»,
-                # и каналы, до которых очередь в этом проходе не дошла, замолкают сразу.
-                # У нас каждый канал отматывает свои 114 проходов ПОДРЯД, поэтому канал,
-                # обслуживаемый раньше канала с END, успевает сделать ещё одну выборку в
-                # последнем кадре. Слышимого следа нет: сразу за ней идёт список тишины.
-                # Допуск — не больше одной такой записи на канал.
-                if (r, v) in STOP and i >= len(mc) - len(STOP):
-                    tail += 1
-                    continue
-                mism += 1
-                if mism <= 3:
-                    print('  канал %s запись %d: модель R%d=%02X, у нас R%d=%02X'
-                          % (CHNAME[ch], i, r, v, r2, v2))
-            shift.add(f - (f0 + (p - 1) // PASSES + 1))
-        if tail > 1:
-            print('  канал %s: хвост после END длиннее одной записи (%d) — это уже дефект' % (CHNAME[ch], tail))
-            mism += tail
-        bad += mism
-        print('  канал %s: сверено %d записей (модель %d, у нас %d), расхождений %d%s, сдвиг кадра %s'
-              % (CHNAME[ch], n, len(mc), len(oc), mism,
-                 (', хвост после END %d' % tail) if tail else '',
-                 ','.join(str(x) for x in sorted(shift)) if shift else '-'))
-    rep.append((name, bad))
-    return bad
+    # ---- слив (msx_viflush) ----
+    def tone(self, c):
+        p = self.regs[2 * c] | ((self.regs[2 * c + 1] & 0x0F) << 8)
+        d = (13 * p + (p >> 1)) & 0xFFFF
+        if d < DIV_MIN:
+            return self.off(c)
+        return self.on(c, d)
 
+    def noise(self, c):
+        n = self.regs[6] & 0x1F
+        return self.on(c, (n or 1) << 8)
 
-def check_sfx(slot, sid, ticks, hi, lo, f0, writes, rep, stepc=0, plx=0, ply=0):
-    """Сверка одного эффекта: модель тикает ticks раз, сверяем канал слота (плюс R6 у шума).
+    def on(self, c, d):
+        self.vdiv[c] = d
+        self.vhold[c] = 3
+        return True
 
-    Эффекту 3 («шаги») нужны живые счётчик шагов и координаты игрока — их журнал снимает
-    в момент запуска. Внутри итерации они не меняются (обработчик игрока отрабатывает
-    ДО звука), а все 23 тика укладываются в одну итерацию.
-    """
-    e = M.Sfx(stepc=stepc, plx=plx, ply=ply)
-    e.start(sid, ticks, hi, lo, slot)
-    for _ in range(ticks):
-        e.tick()
-    ch = SLOT_CH[slot]
-    # Глушение AY в конце игровой итерации (msx_frame_off, MSX 0x41A3) — список из четырёх
-    # записей R7=BF,R8=0,R9=0,R10=0. В модели одного эффекта его нет, поэтому убираем.
-    writes = strip_stop(writes)
-    regs = {0: [0, 1, 8], 1: [2, 3, 9], 2: [4, 5, 10]}[ch]
-    if sid == 1:
-        regs = regs + [6]
-    mc = [(r, v) for _t, r, v in e.log if r in regs]
-    oc = [(r, v) for f, r, v in writes if r in regs]
-    n = min(len(mc), len(oc))
-    mism = sum(1 for i in range(n) if mc[i] != oc[i])
-    shown = 0
-    for i in range(n):
-        if mc[i] != oc[i] and shown < 3:
-            shown += 1
-            print('  эффект %d слот %d запись %d: модель R%d=%02X, у нас R%d=%02X'
-                  % (sid, slot, i, mc[i][0], mc[i][1], oc[i][0], oc[i][1]))
-    full = (n == len(mc) and n > 0)
-    print('  эффект %d (слот %d, канал %s, %d тиков, параметр %02X%02X): сверено %d из %d%s, расхождений %d'
-          % (sid, slot, CHNAME[ch], ticks, hi, lo, n, len(mc),
-             '' if full else ' (оборван следующим эффектом того же слота)', mism))
-    rep.append(('эффект %d' % sid, mism))
-    return mism, n, full
+    def off(self, c):
+        h = self.vhold[c]
+        self.vhold[c] = 0
+        if h == 1:
+            return self.tone(c)
+        if h == 2:
+            return self.noise(c)
+        return False
+
+    def vcalc(self, c):
+        if self.regs[8 + c] < VOL_MIN:
+            return self.off(c)
+        a = KMASK[c] & (~self.regs[7] & 0xFF)
+        if a == 0:
+            return self.off(c)
+        if a & 0x07 == 0:
+            return self.noise(c)
+        return self.tone(c)
+
+    def flush(self):
+        act = [self.vcalc(c) for c in range(3)]
+        w = [FF, 1 if act[1] else FF, 2 if act[2] else FF]
+        if act[0]:
+            if w[2] == FF:
+                w[2] = 0
+            elif w[1] == FF:
+                w[1] = 0
+        for c in (1, 2):
+            if w[c] == FF:
+                if self.own[c] != FF:
+                    self.own[c] = FF
+                    self.nctl[c] += 1
+                    self.eff[c] = 0
+                continue
+            if w[c] != self.own[c]:
+                self.own[c] = w[c]
+                self.nctl[c] += 1
+                self.eff[c] = 0
+                self.cache[c] = 0xFFFF
+            d = self.vdiv[w[c]]
+            if d != self.cache[c]:
+                self.cache[c] = d
+                self.nld[c] += 1
+                self.eff[c] = d
+        self.silence()
+        return w
 
 
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 1
-    ev, w = parse(sys.argv[1])
-    if not w:
-        print('ГЕЙТ ПУСТ: в журнале нет ни одной записи в AY')
-        return 1
-    lastf = w[-1][0]
-    rep = []
-    tunes = [e for e in ev if e[0] == 'TUNE']
-    sfxs = [e for e in ev if e[0] == 'SFX']
-    if not tunes and not sfxs:
-        print('ГЕЙТ ПУСТ: в журнале нет ни мелодий, ни эффектов (записей %d)' % len(w))
-        return 1
-    print('журнал: записей %d, кадров %d, мелодий %d, эффектов %d' % (len(w), lastf, len(tunes), len(sfxs)))
-    for k, (_, a, pos) in enumerate(tunes):
-        f0, off = a[0], a[1]
-        idx, name = tune_by_offset(off)
-        if idx is None:
-            print('МЕЛОДИЯ на кадре %d: смещение %d не совпало ни с одним заголовком' % (f0, off))
-            rep.append(('мелодия@%d' % f0, 1))
-            continue
-        nxt = tunes[k + 1][2] if k + 1 < len(tunes) else len(w)
-        seg = w[pos:nxt]
-        print('мелодия %s, кадр %d..%d:' % (name, f0, seg[-1][0] if seg else f0))
-        check_tune(idx, name, f0, seg, (seg[-1][0] if seg else f0) - f0 + 1, rep)
-    # эффекты: сверяем только те, что начались в тишине (ни мелодии, ни другого эффекта
-    # на том же канале в этот момент) — иначе журнал канала содержит чужие записи
-    seen = set()
-    cov = [0, 0]
+    m = Model()
+    playing = False
+    tframe = False                        # в этом кадре играла мелодия — кадр не сверяется
+    started = False                       # сверка — с первой игровой строки (ITER/TK/FL)
+    obs = {}                              # кадр -> {c: [V, упр, загр]}
+    bad = 0
+    shown = 0
+    nfr = nfr_snd = nfl = nfl_snd = 0
     ids = set()
-    for k, (_, a, pos) in enumerate(sfxs):
-        f0, slot, sid, ticks, hi, lo = a[:6]
-        stepc, plx, ply = (a[6:] + [0, 0, 0])[:3]
-        if (slot, sid, hi, lo) in seen:
+    heard = set()
+    live = {}                             # слот -> id эффекта, для учёта «кто звучал»
+    nsfx = nsfxi = nlad = 0
+    ntk = 0
+    prev_busy_fl = 0
+    tk_full = tk_bad = 0
+    lines = [ln.split() for ln in open(sys.argv[1], encoding='utf-8')]
+
+    def check_frame(f):
+        nonlocal bad, shown, nfr, nfr_snd
+        o = obs.pop(f, None)
+        if o is None:
+            return
+        if started and not tframe:
+            nfr += 1
+            if m.eff[1] or m.eff[2]:
+                nfr_snd += 1
+            for c in (1, 2):
+                v, k, ld = o.get(c, [None, 0, 0])
+                exp = (m.eff[c], m.nctl[c], m.nld[c])
+                if (v, k, ld) != exp:
+                    bad += 1
+                    if shown < 12:
+                        shown += 1
+                        print('  кадр %d счётчик %d: у нас делитель %s упр %d загр %d; модель %d упр %d загр %d'
+                              % (f, c, v, k, ld, exp[0], exp[1], exp[2]))
+        m.nctl = [0, 0, 0]
+        m.nld = [0, 0, 0]
+
+    # V/P-строки кадра f идут в журнале в конце кадра, после событий кадра: копим и сверяем
+    # по приходу V счётчика 2 (последняя строка итога кадра, P печатается между V1 и V2)
+    pend_f = None
+    for p in lines:
+        if not p:
             continue
-        seen.add((slot, sid, hi, lo))
-        nxt = next((x[2] for x in sfxs[k + 1:] if x[1][1] == slot), len(w))
-        if nxt <= pos:
+        t = p[0]
+        if t == 'V':
+            f, c, v = int(p[1]), int(p[2]), int(p[3])
+            if pend_f is not None and pend_f != f:     # итоги двух кадров подряд, без событий
+                check_frame(pend_f)
+                tframe = playing
+            obs.setdefault(f, {}).setdefault(c, [v, 0, 0])[0] = v
+            pend_f = f
             continue
-        _m, _n, full = check_sfx(slot, sid, ticks, hi, lo, f0, w[pos:nxt], rep, stepc, plx, ply)
-        cov[0] += _n
-        cov[1] += 1 if full else 0
-        ids.add(sid)
-    total = sum(b for _, b in rep)
-    print('---')
-    if sfxs:
-        print('эффекты: сверено записей %d, эффектов целиком %d, встречены id %s'
-              % (cov[0], cov[1], ','.join(str(x) for x in sorted(ids))))
-        if cov[1] == 0:
-            print('ГЕЙТ ВАКУУМЕН: ни один эффект не досверен до конца (все оборваны)')
-            total += 1
-    print('проверено: %s' % ', '.join('%s %s' % (n, 'ОК' if b == 0 else 'РАСХОЖДЕНИЙ %d' % b) for n, b in rep))
-    print('ИТОГО расхождений: %d' % total)
-    return 1 if total else 0
+        if t == 'P':
+            f, c = int(p[1]), int(p[2])
+            ent = obs.setdefault(f, {}).setdefault(c, [None, 0, 0])
+            ent[1], ent[2] = int(p[3]), int(p[4])
+            continue
+        # любое событие после итога кадра — кадр закрыт
+        if pend_f is not None:
+            check_frame(pend_f)
+            tframe = playing
+            pend_f = None
+        if t == 'TUNE':
+            playing = True
+            tframe = True
+            m.mute()
+        elif t == 'TEND':
+            playing = False
+            tframe = True
+            m.mute()
+        elif t == 'INIT':
+            m.init()
+        elif t in ('ITER', 'TK', 'FL'):
+            started = True
+            if t == 'TK':
+                ntk += 1
+                m.tick()
+            elif t == 'FL':
+                if playing:
+                    continue
+                nfl += 1
+                # число тиков итерации: если движок был занят весь объектный цикл (занят на
+                # прошлом сливе и занят сейчас), тиков ровно 56
+                if prev_busy_fl and m.busy:
+                    tk_full += 1
+                    if ntk != TICKS:
+                        tk_bad += 1
+                        bad += 1
+                        if shown < 12:
+                            shown += 1
+                            print('  кадр %s: за итерацию тиков %d, у MSX %d' % (p[1], ntk, TICKS))
+                elif ntk > TICKS:
+                    tk_bad += 1
+                    bad += 1
+                    print('  кадр %s: за итерацию тиков %d > %d' % (p[1], ntk, TICKS))
+                ntk = 0
+                w = m.flush()
+                if w[1] != FF or w[2] != FF:
+                    nfl_snd += 1
+                    for c in (1, 2):
+                        if w[c] != FF and w[c] in live:
+                            heard.add(live[w[c]])
+                prev_busy_fl = m.busy
+                live = {s: m.e.slot[s][0] for s in range(3) if m.e.slot[s][0]}
+        elif t in ('SFX', 'SFXI'):
+            a = [int(x) for x in p[1:]]
+            f0, slot, sid, ticks, hi, lo = a[:6]
+            stepc, x, y = (a[6:] + [0, 0, 0])[:3]
+            m.start(slot, sid, ticks, hi, lo, stepc, x, y, vhnew=(t == 'SFX'))
+            ids.add(sid)
+            live[slot] = sid
+            if t == 'SFX':
+                nsfx += 1
+            else:
+                nsfxi += 1
+        elif t == 'LAD':
+            m.ladder()
+            nlad += 1
+    if pend_f is not None:
+        check_frame(pend_f)
+    heard.discard(0)
+    print('журнал: кадров сверено %d (со звуком по модели %d), сливов %d (со звуком %d), '
+          'запусков эффектов %d + стендом %d, лесенок %d'
+          % (nfr, nfr_snd, nfl, nfl_snd, nsfx, nsfxi, nlad))
+    print('эффекты: запущены id %s; слышны на сливе id %s'
+          % (','.join(map(str, sorted(ids))) or '-', ','.join(map(str, sorted(heard))) or '-'))
+    print('тики: итераций с занятым движком целиком %d, из них не по %d тиков: %d' % (tk_full, TICKS, tk_bad))
+    if nfr == 0 or nfl == 0:
+        print('ГЕЙТ ПУСТ: нет ни сверенных кадров, ни сливов')
+        return 1
+    if nfr_snd == 0:
+        print('ГЕЙТ ВАКУУМЕН: по модели ни в одном кадре счётчики не звучат')
+        return 1
+    print('ИТОГО расхождений: %d' % bad)
+    return 1 if bad else 0
 
 
 if __name__ == '__main__':
