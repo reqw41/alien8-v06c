@@ -37,7 +37,12 @@ const memory = new ctx.Memory(), keyboard = new ctx.Keyboard(), timer = new ctx.
 const JOY_R=0x01, JOY_L=0x02, JOY_U=0x04, JOY_D=0x08, JOY_F1=0x40, JOY_F2=0x80, JOY_IDLE=0xFF;
 let JOY = JOY_IDLE;
 function joy(...bits){ JOY = JOY_IDLE; for(const b of bits) JOY &= ~b & 0xFF; return JOY; }
-{ const _rd = io.input.bind(io); io.input = p => ((p & 0xFF) === 0x0E ? JOY : _rd(p)); }
+// С 2026-10-19 джойстик — «П»: порт 6 за портом 5, как в ядре MiSTer (Vector-06C.sv, joyP_o:
+// биты 6:5 порта 5 выбирают 00 = A&B, 01 = A, 10 = B, 11 = никого). Стенд держит одно устройство
+// (A); порт 0x0E «молчит» (0xFF), чтобы засчитаться мог только путь через «П».
+let JSEL = 3;
+{ const _out = io.output.bind(io); io.output = (p, v) => { if ((p & 0xFF) === 0x05) JSEL = (v >> 5) & 3; return _out(p, v); }; }
+{ const _rd = io.input.bind(io); io.input = p => ((p & 0xFF) === 0x06 ? (JSEL < 2 ? JOY : 0xFF) : (p & 0xFF) === 0x0E ? 0xFF : _rd(p)); }
 const cpu = new ctx.I8080(memory, io), tape = { advance: () => {}, sample: 0, reset: () => {} },
   v06c = new ctx.Vector06c(cpu, memory, io, ay, tape);
 v06c.bmp = new Uint32Array(576 * 288); v06c.displayFrame = () => {}; v06c.check_breakpoint = () => false; v06c.dbg = null;
@@ -241,13 +246,12 @@ for (let n = 0; n < 100000 && cpu.pc !== PARK; n++) cpu.instruction();
 cpu.iff = true;
 chk(rd(L.user_input) === 0x00, `конец игры: джойстик не читается (user_input=0x${rd(L.user_input).toString(16)})`);
 wr(L.byte_5B23, 0);
-// ДЖОЙСТИКА НЕТ (порт читается нулём): после cpl «нажато всё» — игра была бы неуправляема.
-// Проверка стоит на фронте vec_joy: биты 4 и 5 схема держит в единице, после cpl там обязаны
-// быть нули, иначе состояние считается пустым. Возврат 0xFF (обычный для несуществующего порта)
-// и так означает покой, поэтому опасен именно ноль.
+// МУСОР НА ШИНЕ (порт 6 после замера покоя вдруг читается нулём): после нормировки «нажато всё»
+// — игра была бы неуправляема. Проверка стоит на фронте vec_joy: биты 4 и 5 схема держит в
+// единице, после xor с покоем там обязаны быть нули, иначе состояние считается пустым.
 { const _rd = io.input.bind(io); const save = io.input;
-  io.input = p => ((p & 0xFF) === 0x0E ? 0x00 : _rd(p));
-  chk(userInput(8, [], []) === 0x00, "порт 0x0E читается нулём (эмулятор без джойстика) — считаем отпущенным");
+  io.input = p => ((p & 0xFF) === 0x06 ? 0x00 : _rd(p));
+  chk(userInput(8, [], []) === 0x00, "порт 6 читается нулём при покое 0xFF (мусор) — считаем отпущенным");
   io.input = save; }
 
 // РЯДЫ ZX: кнопка сведена к клавише '0' («0 START GAME» и «нажми любую клавишу»), направления
@@ -283,7 +287,9 @@ chk(zxrows() === rowsIdle, "клавишу '0' отпустили — ряды �
   const CALL = 24, CALLI = 17;
   console.log(`ЦЕНА: vec_joy в кадре покоя ${cyc} + ${CALL} (call) = ${cyc + CALL} тактов Вектора ` +
               `(${i8} + ${CALLI} = ${i8 + CALLI} тактов i8080)`);
-  chk(cyc + CALL <= 112, `цена vec_joy в ISR ${cyc + CALL} тактов Вектора за кадр (бюджет 112)`);
+  // Бюджет 116: джойстик «П» нормирует чтение значением покоя (xor imm вместо cpl, +4 такта к
+  // прежним 112 на порту 0x0E).
+  chk(cyc + CALL <= 116, `цена vec_joy в ISR ${cyc + CALL} тактов Вектора за кадр (бюджет 116)`);
 }
 
 // «взять/бросить» проходит через chk_pickup_drop: в directional бит 5, иначе бит 4

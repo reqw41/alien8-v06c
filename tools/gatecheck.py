@@ -184,6 +184,13 @@ MUTS = [
              "\t\t\t\tld\t\ta, (hl)\n\t\t\t\tand\t\t0xFE\n",
          new="vj_fire:\t\tld\t\thl, vec_zxrows+4\t; FIRE -> клавиша '0' (ряд ZX 4, бит 0)\n"
              "\t\t\t\tld\t\ta, (hl)\n\t\t\t\tand\t\t0xFF\t\t\t\t; ПОРЧА: кнопка в ряды ZX не попадает\n"),
+    dict(name="joyport", gate="inputcheck",
+         why="джойстик снова читается из порта 0x0E, а не «П» (порт 6): на Турбо+ там мусор, "
+             "на MiSTer — только джойстик A. Стенд держит 0x0E молчащим, и ни направления, ни "
+             "кнопка с джойстика не доходят",
+         file="tools/a8_vec.py",
+         old="vec_joy:\t\tin\t\ta, (0x06)\t\t\t; джойстик «П»\n",
+         new="vec_joy:\t\tin\t\ta, (0x0E)\t\t\t; ПОРЧА: старый порт джойстика\n"),
     dict(name="kbmap", gate="kbcheck",
          why="отображение «клавиша Вектора -> ряд ZX»: Z уехала с 0x04 на 0x08 ряда 7. Гейт "
              "картинки и локстеп кладут ряды ZX в память сами и этот путь не видят",
