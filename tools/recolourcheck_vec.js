@@ -38,7 +38,7 @@
 //      POSTF кадров.
 "use strict";
 const fs = require("fs"), vm = require("vm");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM, SLD] = process.argv.slice(2);
 if (!ROM || !SLD) { console.log("нужно: <rom> <sld>"); process.exit(2); }
 const WARM = +(process.env.A8RC_WARM || 20), MAXF = +(process.env.A8RC_MAXF || 150);

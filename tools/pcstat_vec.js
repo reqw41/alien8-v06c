@@ -9,7 +9,7 @@
 // номер комнаты подменяется в САМОЙ записи поля +8 объектов 0 и 1 в фазе init.
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM,SLD,NS,LABELS,ROOMS,INPUTS]=process.argv.slice(2); const N=+NS||200;
 const LAG=+(process.env.A8_LAG||1);
 const L={},lab=[];

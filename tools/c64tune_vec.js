@@ -10,7 +10,7 @@
 // и START — распаковка игры (заливка плоскостей, потоки H/P3, поток L на месте).
 // Расхождений 0 -> PASS. Образцы: kbcheck_vec.js, tunecheck_vec.js.
 const fs = require("fs"), vm = require("vm"), cp = require("child_process");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const ROM = process.argv[2] || "build/alien8_release.r0m";
 const NREF = +(process.env.C64N || 8527); // 8427 кадров цикла + 100 кадров зацикливания
 const g = {};

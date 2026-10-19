@@ -23,7 +23,7 @@
 // Код возврата: 0 — в судимой плоскости вне строк 32..223 не записано ни байта; 1 — записано.
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM,SLD,NS,INPUTS]=process.argv.slice(2); const N=+NS||300;
 const NPC=+(process.env.A8HOLE_PC||20);
 const JUDGE=parseInt(process.env.A8HOLE_PLANE||"A000",16)>>8;   // страница-база судимой плоскости

@@ -9,7 +9,7 @@
 //   m.outs — если массив: туда же ВСЕ выводы в порты (m.outs = [] включает запись)
 "use strict";
 const fs = require("fs"), vm = require("vm");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const FILES = ["i8080-js/i8080_trace.js", "i8080-js/i8080_disasm.js", "i8080-js/i8080.js",
   "src/fili.js", "src/ay.js", "src/fd1793.js", "src/fddimage.js", "src/i8253.js",
   "src/io.js", "src/keyboard.js", "src/memory.js", "src/sound.js", "src/tv.js"];

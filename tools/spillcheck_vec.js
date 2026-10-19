@@ -40,7 +40,7 @@
 //             ПРОХОДИТ на обычной сборке — ровно поэтому test-сборка и нужна.
 "use strict";
 const fs = require("fs"), vm = require("vm"), cp = require("child_process");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM, SLD, NS, INPUTS, ROOMSA] = process.argv.slice(2);
 const N = +NS || 300;
 if (!ROM || !SLD) { console.error("нужно: <rom> <sld> <итераций> [inputs.txt] [комнаты|all]"); process.exit(2); }

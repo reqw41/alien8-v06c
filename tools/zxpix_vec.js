@@ -43,7 +43,7 @@
 // A8_IRQDROP=1 — модель железа (прерывание не защёлкивается); A8MAXPNG — не нужен.
 "use strict";
 const fs=require("fs"),vm=require("vm"),cp=require("child_process");
-const base="/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM,SLD,NS,INPUTS,ZXSCR,ZXSTA,TAGA]=process.argv.slice(2); const N=+NS||600;
 if(!ROM||!SLD||!ZXSCR){console.error("нужно: <rom> <sld> <итераций> <inputs.txt> <zx_screen.bin> [zx_states.bin] [метка]");process.exit(2);}
 const ZXST=ZXSTA||ZXSCR.replace(/\.bin$/,".st.bin");

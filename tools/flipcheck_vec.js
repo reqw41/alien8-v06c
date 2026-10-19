@@ -13,7 +13,7 @@
 // в таблице есть записи, которые игра не использует, и разворот по ним портит чужую память.
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM,SLD]=process.argv.slice(2);
 const L={};
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L))L[n]=+p[5];}}

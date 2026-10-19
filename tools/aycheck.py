@@ -51,7 +51,7 @@ msx_tv_mute.
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser('~/projects/alien8-research/msx'))
+sys.path.insert(0, os.path.join(os.environ.get('A8_RESEARCH', os.path.expanduser('~/projects/alien8-research')), 'msx'))
 import msx_psg_model as M   # noqa: E402
 
 TICKS = 56                       # тиков движка эффектов за игровую итерацию (MSX: 56 объектов)

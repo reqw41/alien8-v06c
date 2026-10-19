@@ -31,7 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import a8_tune_c64 as T  # noqa: E402
 
-MSX_DIR = os.path.expanduser('~/projects/alien8-research/msx')
+MSX_DIR = os.path.join(os.environ.get('A8_RESEARCH', os.path.expanduser('~/projects/alien8-research')), 'msx')
 MODEL = os.path.join(MSX_DIR, 'msx_psg_model.py')
 OUT = os.path.join(HERE, '..', 'src', 'msx_tunes_vi53.bin')
 PREVIEW = os.path.join(HERE, '..', 'build', 'tmp', 'msx_tunes_vi53')

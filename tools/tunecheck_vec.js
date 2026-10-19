@@ -15,7 +15,7 @@
 // (адрес байта каталога) и меткой возврата в стеке — ровно так, как зовёт игра.
 "use strict";
 const fs = require("fs"), vm = require("vm"), cp = require("child_process");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM, SLD] = process.argv.slice(2);
 const L = {};
 for (const l of fs.readFileSync(SLD, "latin1").split("\n")) {

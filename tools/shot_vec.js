@@ -5,7 +5,7 @@
 // Печатает также состояние: PC, SP, кадры, ВИ53 тикает (иначе бюджет di стоит, §14).
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM,NS,KEYS,OUT]=process.argv.slice(2); const N=+NS||600;
 const g={};g.window=g;g.document={createElement:()=>fc(),getElementById:()=>fc()};
 function fcx(){return{createImageData:()=>({data:new Uint8ClampedArray(4)}),putImageData:()=>{},getImageData:()=>({data:new Uint8ClampedArray(4)}),fillRect(){},drawImage(){}};}

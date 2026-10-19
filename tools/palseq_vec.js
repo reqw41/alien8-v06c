@@ -32,8 +32,8 @@
 // раскладкой кода играют РАЗНЫЙ сценарий и последовательности «до/после» несравнимы.
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
-const HOME=process.env.HOME+"/projects/alien8-research/zx-stand/";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
+const HOME=(process.env.A8_RESEARCH || (process.env.HOME+"/projects/alien8-research"))+"/zx-stand/";
 const [ROM,SLD,NS,INPA]=process.argv.slice(2); const N=+NS||600;
 if(!ROM||!SLD){console.error("нужно: <rom> <sld> [итераций] [inputs1.txt,inputs2.txt]");process.exit(2);}
 const LAG=+(process.env.A8_LAG||1);

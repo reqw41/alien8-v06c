@@ -5,7 +5,7 @@
 // ВИ53 тикает вдвое медленнее CPU — иначе секундомер бюджета di стоит и замер врёт.
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM,SLD,NS,INPUTS]=process.argv.slice(2); const N=+NS||300;
 const LAG=+(process.env.A8_LAG||1);
 const IRQDROP=!!process.env.A8_IRQDROP;

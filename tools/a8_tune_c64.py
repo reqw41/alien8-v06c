@@ -23,7 +23,7 @@ import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.expanduser('~/projects/alien8-research/c64/final/alien8_c64_tune_E.vi53')
+SRC = os.path.join(os.environ.get('A8_RESEARCH', os.path.expanduser('~/projects/alien8-research')), 'c64/final/alien8_c64_tune_E.vi53')
 OUT = os.path.join(HERE, '..', 'src', 'c64_tune.bin')
 MAXDEPTH = 16
 

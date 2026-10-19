@@ -30,7 +30,7 @@
 // байт палитры — %BBGGGRRR. Плоскость 2 здесь и есть СЕЛЕКТОР БЕЛОГО HUD.
 "use strict";
 const fs=require("fs"),vm=require("vm"),zlib=require("zlib");
-const base="/Users/boris/projects/vector06js";
+const base = process.env.V06 || (process.env.HOME + "/projects/vector06js");
 const [ROM,SLD,NS,OUT]=process.argv.slice(2); const N=+NS||300;
 if(!ROM||!SLD){console.error("нужно: <rom> <sld> <итераций> [out.png]");process.exit(2);}
 const L={};

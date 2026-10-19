@@ -25,7 +25,7 @@
 import os
 import sys
 
-STAND = os.path.expanduser('~/projects/alien8-research/zx-stand')
+STAND = os.path.join(os.environ.get('A8_RESEARCH', os.path.expanduser('~/projects/alien8-research')), 'zx-stand')
 DEFAULT = ['zx_screen_idle.bin', 'zx_screen_r39.bin', 'zx_screen_r137.bin', 'zx_screen_r104.bin']
 REC, PIX = 6912, 6144
 WHITE = 0x47                    # яркий белый на чёрном: ровно им оригинал красит элементы HUD
