@@ -72,6 +72,15 @@ elif [ "$TARGET" = "roms" ]; then
   mkdir -p rom
   cp build/alien8_release.r0m rom/alien8.r0m
   cp build/alien8_vec.r0m rom/alien8-nosplash.r0m
+  # образ с 0x0100 для загрузчиков, которые кладут программу с 0x0100 (обычный .rom Вектора,
+  # Вектор Турбо+ из CP/M с ключом -V): тот же снимок без заставки, упакованный tools/mkcom.py
+  python3 tools/mkcom.py build/alien8_vec.r0m build/alien8_com.asm
+  case "$SJ" in /*) SJA="$SJ" ;; */*) SJA="$PWD/$SJ" ;; *) SJA="$SJ" ;; esac
+  (cd build && "$SJA" --nologo --msg=war --i8080 alien8_com.asm --lst=alien8_com.lst)
+  cp build/alien8_com.rom rom/alien8-0100.rom
+  V06=${V06JS:-${V06:-$HOME/projects/vector06js}}
+  if [ -d "$V06" ]; then V06JS="$V06" node tools/comgate_vec.js rom/alien8-0100.rom rom/alien8-nosplash.r0m
+  else echo "comgate пропущен: нет vector06js ($V06)"; fi
   ls -la rom
 else
   echo "неизвестная цель: $TARGET"; exit 1
